@@ -8,14 +8,19 @@ import { SpecView } from './components/SpecView';
 import { DeliverablesView } from './components/Deliverables';
 import { WorkflowsView } from './components/Workflows';
 import { itemOverdue } from './lib/format';
+import { PathsView } from './components/Paths';
+import { SubjectsView } from './components/Subjects';
+import { isPersonTask } from './components/WorkQueue';
 
 const VIEWS = [
   ['overview', 'Pipelines'],
+  ['subjects', 'Subjects'],
+  ['paths', 'Paths'],
   ['deliverables', 'Deliverables'],
-  ['queue', 'Work queue'],
-  ['workflows', 'Workflows'],
+  ['queue', 'Tasks'],
+  ['workflows', 'Scripts'],
   ['log', 'Event log'],
-  ['spec', 'Config & spec'],
+  ['spec', 'Config'],
 ] as const;
 type View = (typeof VIEWS)[number][0];
 
@@ -47,10 +52,12 @@ export function App({ source }: { source: TrackerSource }) {
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(t); }, []);
 
   const run = (p: Promise<void>) => p.then(() => setNotice(null)).catch((e: unknown) => setNotice(e instanceof Error ? e.message : String(e)));
+  const tryRun = (p: Promise<void>) => p.then(() => { setNotice(null); return true; })
+    .catch((e: unknown) => { setNotice(e instanceof Error ? e.message : String(e)); return false; });
 
   const overdue = snapshot
     ? snapshot.tasks.filter((t) => dueState(t, now) === 'overdue').length
-      + snapshot.deliverables.flatMap((d) => d.items.filter((i) => i.mode === 'manual' && i.status !== 'done' && i.status !== 'skipped'
+      + snapshot.deliverables.flatMap((d) => d.items.filter((i) => isPersonTask(i, snapshot) && i.status !== 'done' && i.status !== 'skipped'
         && itemOverdue(i.dueDate ?? d.dueDate, now))).length
     : 0;
   const lateDeliverables = snapshot ? snapshot.deliverables.filter((d) => d.risk !== 'ok').length : 0;
@@ -123,6 +130,14 @@ export function App({ source }: { source: TrackerSource }) {
         />
       )}
       {snapshot && view === 'workflows' && <WorkflowsView snapshot={snapshot} now={now} />}
+      {snapshot && view === 'subjects' && <SubjectsView snapshot={snapshot} fetchUnits={source.fetchUnits} />}
+      {snapshot && view === 'paths' && (
+        <PathsView snapshot={snapshot} now={now} actions={{
+          add: (e) => tryRun(source.addLocation(e, me)),
+          update: (id, p) => tryRun(source.updateLocation(id, p, me)),
+          remove: (id) => tryRun(source.deleteLocation(id, me)),
+        }} />
+      )}
       {snapshot && view === 'log' && <EventLogView snapshot={snapshot} />}
       {view === 'spec' && <SpecView />}
     </div>

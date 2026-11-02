@@ -5,7 +5,10 @@
 CREATE TABLE IF NOT EXISTS study (
   study_id text PRIMARY KEY,                 -- 'ABCD', 'HBCD', 'UKB', ...
   name     text NOT NULL,
-  source   text NOT NULL,                    -- source adapter, e.g. 'NDA fast-track'
+  source   text NOT NULL,                    -- where the data comes from, e.g. 'NDA (on disk)'
+  host     text NOT NULL DEFAULT 'local',    -- where the data lives: local, TSD, HUNT Cloud, ...
+  release  text,                             -- current release, used in path templates as {release}
+  visits   text[] NOT NULL DEFAULT '{}',
   sort_order int NOT NULL DEFAULT 0,          -- display order on the dashboard
   dua_ref  text                              -- data use agreement / access tier
 );
@@ -22,6 +25,21 @@ CREATE TABLE IF NOT EXISTS study_team (
   role     text NOT NULL,
   PRIMARY KEY (study_id, person, role)
 );
+
+-- Editable inventory of where each study's data lives, by modality (NULL = all modalities).
+-- Seeded from studies.yaml; edited on the dashboard. Step and item path templates refer to these by key.
+CREATE TABLE IF NOT EXISTS data_location (
+  location_id bigserial PRIMARY KEY,
+  study_id    text NOT NULL REFERENCES study ON DELETE CASCADE,
+  modality    text,
+  key         text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]*$'),
+  path        text NOT NULL,
+  host        text NOT NULL DEFAULT 'local',
+  description text,
+  updated_by  text,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS data_location_key ON data_location (study_id, COALESCE(modality, ''), key);
 
 CREATE TABLE IF NOT EXISTS participant (
   study_id       text REFERENCES study,
@@ -67,6 +85,7 @@ CREATE TABLE IF NOT EXISTS step (
   task_label     text,
   exclude_reason text,
   command        text,                       -- template for processing runs: {pipeline} {step} {run_id} {study}
+  output         text,                       -- path template of the step's output; exists on disk = step done
   -- who starts processing at an automated step: the tracker's scheduler, or an external engine
   -- that reports progress itself through POST /api/events
   launch         text NOT NULL DEFAULT 'scheduler' CHECK (launch IN ('scheduler','external')),
@@ -82,6 +101,7 @@ CREATE TABLE IF NOT EXISTS work_unit (
   state       text NOT NULL CHECK (state IN ('expected','queued','running','failed','released','excluded')),
   input_hash  text,                          -- re-run when inputs or pipeline version change
   attempts    int NOT NULL DEFAULT 0,        -- failures so far at the current step
+  paths       jsonb NOT NULL DEFAULT '{}',   -- actual output paths by step, when they differ from the template
   updated_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (session_id, pipeline_id),
   FOREIGN KEY (pipeline_id, step_key) REFERENCES step
@@ -116,7 +136,7 @@ CREATE TABLE IF NOT EXISTS event (
   from_state       text,
   to_state         text,
   kind             text NOT NULL CHECK (kind IN ('arrive','start','done','fail','decision','assign','task','retry',
-                                                 'item','run','deliverable')),
+                                                 'item','run','deliverable','location')),
   actor            text NOT NULL,
   actor_kind       text NOT NULL CHECK (actor_kind IN ('pipeline','person','system')),
   software_version text,
@@ -140,7 +160,7 @@ CREATE TABLE IF NOT EXISTS workflow (
   workflow_id text PRIMARY KEY,
   name        text NOT NULL,
   engine      text NOT NULL,                 -- nextflow | slurm | python | script | ... (workers claim by engine)
-  trigger     text NOT NULL CHECK (trigger IN ('on_ready','manual')),
+  trigger     text NOT NULL CHECK (trigger IN ('external','on_ready','manual')),
   maintainer  text NOT NULL REFERENCES person,
   command     text NOT NULL,                 -- template: {study} {deliverable} {item} {run_id}
   description text
@@ -154,6 +174,7 @@ CREATE TABLE IF NOT EXISTS deliverable (
   description    text,
   owner          text NOT NULL REFERENCES person,   -- the single Accountable person
   due_date       date,
+  release        text,                       -- {release} in output path templates
   sort_order     int NOT NULL DEFAULT 0,
   last_state     text                        -- scheduler bookkeeping, to log state changes once
 );
@@ -166,12 +187,13 @@ CREATE TABLE IF NOT EXISTS deliverable_dependency (
   CHECK (deliverable_id <> depends_on)
 );
 
--- Deliverable cannot start until a pipeline has released at least this share of its units
+-- Deliverable cannot start until this share of a pipeline's units is past step_key ('' = complete)
 CREATE TABLE IF NOT EXISTS deliverable_gate (
   deliverable_id text REFERENCES deliverable ON DELETE CASCADE,
   pipeline_id    text REFERENCES pipeline,
+  step_key       text NOT NULL DEFAULT '',
   min_released   numeric NOT NULL CHECK (min_released > 0 AND min_released <= 1),
-  PRIMARY KEY (deliverable_id, pipeline_id)
+  PRIMARY KEY (deliverable_id, pipeline_id, step_key)
 );
 
 CREATE TABLE IF NOT EXISTS deliverable_raci (
@@ -189,8 +211,10 @@ CREATE TABLE IF NOT EXISTS work_item (
   title          text NOT NULL,
   mode           text NOT NULL CHECK (mode IN ('manual','automated')),
   workflow_id    text REFERENCES workflow,
-  assignee       text REFERENCES person,
+  assignee       text REFERENCES person,     -- who does it (manual) or runs it (automated)
   status         text NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','done','failed','skipped')),
+  output_template text,                      -- where the result goes (path inventory names, {release}, {deliverable})
+  output_path    text,                       -- actual path recorded when it differs from the template
   due_date       date,
   updated_at     timestamptz NOT NULL DEFAULT now(),
   CHECK ((mode = 'automated') = (workflow_id IS NOT NULL))

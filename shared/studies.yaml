@@ -1,27 +1,21 @@
-# Study configuration: people, default pipelines per data type, and per-study customizations.
+# Study configuration: people, path inventory, visits, and the processing chain per modality.
 #
-# Settings resolve in this order (later wins):
-#   defaults  →  study  →  study.modalities.<modality>
+# Settings resolve in this order (later wins):  defaults → study → study.modalities.<modality>
 #
-# Apply changes to a running system:   cd server && npm run config:load
-#   Updates names, commands, engines, SLAs, launch modes, scheduler settings and teams.
-#   Changing which steps a pipeline has (add_steps / skip) needs a reseed: npm run db:reset
+# PATH INVENTORY
+#   `paths` define named locations (raw_root, mmps_root, ...). They seed the editable path
+#   inventory on the dashboard (Paths tab); after the first load the dashboard is the place to
+#   edit them, and `npm run config:load` leaves edited entries alone (use --paths to overwrite).
+#   Values may use {study} {release} and other path names. Step `output` templates use the names
+#   plus {subject} {visit} {modality}; the import and scan scripts check those paths on disk.
+#   All paths below are placeholders except where noted: set them to your real layout.
 #
-# Step overrides (under `steps:` at study or modality level), keyed by step key:
-#   name, command, role, sla_days, task_label, exclude_reason
-#   launch: scheduler | external   who starts processing at an automated step
-#           scheduler: the tracker queues batch runs for workers
-#           external:  the study's own engine runs it and reports through POST /api/events
-#   skip: true                     drop the step for this study/modality
-# add_steps: insert extra steps, each with `after: <step key>`
+# TRACKING MODE
+#   launch: external — the tracker launches nothing; people and existing scripts run the jobs,
+#   and `npm run scan` (or the API) records progress. Steps can be switched to `scheduler` later.
 #
-# Scheduler settings (under `scheduler:`):
-#   batch_size                 units per processing run ("auto" = expected units / 200, min 5)
-#   max_active_runs_per_step   concurrent processing runs per step
-#   auto_retry                 times a failed unit is requeued automatically before a person must act
-#   qc_batch_size              units per manual review batch (auto-assigned to the least-loaded team member)
-#
-# Unit counts are order-of-magnitude placeholders, not official numbers.
+# Apply edits to a running system:   cd server && npm run config:load
+# Changing which steps a pipeline has (add_steps / skip) needs a reseed: npm run db:reset
 
 people:
   - { name: You, role: study_lead }
@@ -33,120 +27,120 @@ people:
   - { name: Sara K., role: data_manager }
 
 defaults:
-  scheduler: { batch_size: auto, max_active_runs_per_step: 2, auto_retry: 1, qc_batch_size: 50 }
+  launch: external
+  scheduler: { batch_size: auto, max_active_runs_per_step: 2, auto_retry: 0, qc_batch_size: 50 }
+  host: local
+  paths:
+    raw_root: ~/data/{study}/raw                  # raw DICOM / source files per subject and visit
+    mmps_root: ~/data/{study}/mmps/proc           # MMPS processing containers
+    fsurf_root: ~/data/{study}/mmps/fsurf         # FreeSurfer recon (via MMPS)
+    nq_root: ~/data/{study}/neuroquant            # NeuroQuant reports and volumes
+    roi_root: ~/data/{study}/derivatives/roi      # per-subject ROI measures
+    atlas_root: ~/data/{study}/derivatives/atlas  # results registered to atlas space
+    concat_root: ~/data/{study}/concat/{release}  # concatenated voxelwise / vertexwise data
+    svd_root: "{concat_root}/svd"                 # SVD of concatenated data
+    tables_root: ~/data/{study}/tables/{release}  # release spreadsheets
   pipelines:
-    mri:
-      engine: nextflow:mri-preproc
-      version: 3.2.0
+    smri:
       steps:
-        - { key: validate, name: Validate DICOM, mode: auto, command: "dicom_validate --pipeline {pipeline}" }
-        - { key: deidentify, name: De-identify, mode: auto, command: "deid --profile strict" }
-        - { key: bids, name: BIDS convert, mode: auto, command: "dcm2bids" }
-        - { key: auto_qc, name: Auto QC, mode: auto, command: "mriqc --participant" }
-        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
-        - { key: preprocess, name: Preprocess, mode: auto, command: "preprocess --pipeline {pipeline}" }
-        - { key: release, name: Release, mode: auto, command: "package_units --pipeline {pipeline}" }
+        - { key: import, name: Raw data on disk, mode: auto, output: "{raw_root}/{subject}/{visit}" }
+        - { key: mmps_proc, name: MMPS processing, mode: auto, output: "{mmps_root}/MRIPROC_{subject}_{visit}" }
+        - { key: fsurf, name: FreeSurfer recon, mode: auto, output: "{fsurf_root}/FSURF_{subject}_{visit}" }
+        - { key: neuroquant, name: NeuroQuant, mode: auto, output: "{nq_root}/{subject}_{visit}" }
+        - { key: qc, name: Image QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: sMRI QC, exclude_reason: QC_FAIL }
+        - { key: roi_extract, name: ROI measures extracted, mode: auto, output: "{roi_root}/smri/{subject}_{visit}.csv" }
+        - { key: atlas_reg, name: Registered to atlas (vertexwise), mode: auto, output: "{atlas_root}/smri/{subject}/{visit}" }
+    dmri:
+      steps:
+        - { key: import, name: Raw data on disk, mode: auto, output: "{raw_root}/{subject}/{visit}" }
+        - { key: mmps_proc, name: MMPS processing (DTI/RSI), mode: auto, output: "{mmps_root}/DTIPROC_{subject}_{visit}" }
+        - { key: qc, name: Image QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: dMRI QC, exclude_reason: QC_FAIL }
+        - { key: roi_extract, name: ROI and tract measures extracted, mode: auto, output: "{roi_root}/dmri/{subject}_{visit}.csv" }
+        - { key: atlas_reg, name: Registered to atlas (voxelwise), mode: auto, output: "{atlas_root}/dmri/{subject}/{visit}" }
+    fmri:
+      steps:
+        - { key: import, name: Raw data on disk, mode: auto, output: "{raw_root}/{subject}/{visit}" }
+        - { key: mmps_proc, name: MMPS processing (rs/task fMRI), mode: auto, output: "{mmps_root}/BOLDPROC_{subject}_{visit}" }
+        - { key: qc, name: Image QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: fMRI QC, exclude_reason: QC_FAIL }
+        - { key: roi_extract, name: ROI and connectivity measures extracted, mode: auto, output: "{roi_root}/fmri/{subject}_{visit}.csv" }
+        - { key: atlas_reg, name: Registered to atlas (vertexwise), mode: auto, output: "{atlas_root}/fmri/{subject}/{visit}" }
     pet:
-      engine: pet-suvr
-      version: 1.4.0
       steps:
-        - { key: validate, name: Validate, mode: auto }
-        - { key: deidentify, name: De-identify, mode: auto }
-        - { key: coregister, name: Coregister to MRI, mode: auto }
-        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
-        - { key: suvr, name: SUVR / centiloid, mode: auto }
-        - { key: release, name: Release, mode: auto }
+        - { key: import, name: Raw data on disk, mode: auto, output: "{raw_root}/{subject}/{visit}/pet" }
+        - { key: mmps_proc, name: MMPS PET processing, mode: auto, output: "{mmps_root}/PETPROC_{subject}_{visit}" }
+        - { key: qc, name: Image QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: PET QC, exclude_reason: QC_FAIL }
+        - { key: roi_extract, name: SUVR measures extracted, mode: auto, output: "{roi_root}/pet/{subject}_{visit}.csv" }
+        - { key: atlas_reg, name: Registered to atlas, mode: auto, output: "{atlas_root}/pet/{subject}/{visit}" }
     eeg:
-      engine: eeg-prep
-      version: 2.0.1
       steps:
-        - { key: validate, name: Validate, mode: auto }
-        - { key: bids, name: BIDS convert, mode: auto }
-        - { key: auto_qc, name: Auto QC, mode: auto }
-        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
-        - { key: preprocess, name: Preprocess, mode: auto }
-        - { key: release, name: Release, mode: auto }
+        - { key: import, name: Raw data on disk, mode: auto, output: "{raw_root}/{subject}/{visit}/eeg" }
+        - { key: preprocess, name: EEG preprocessing, mode: auto, output: "~/data/{study}/eeg/proc/{subject}_{visit}" }
+        - { key: qc, name: EEG QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: EEG QC, exclude_reason: QC_FAIL }
+        - { key: roi_extract, name: EEG features extracted, mode: auto, output: "{roi_root}/eeg/{subject}_{visit}.csv" }
     genomics:
-      engine: gen-qc
-      version: 5.1.0
       steps:
-        - { key: validate, name: Validate manifest, mode: auto }
-        - { key: sample_qc, name: Sample QC, mode: auto }
-        - { key: variant_qc, name: Variant QC review, mode: manual, role: genomics_analyst, sla_days: 5, task_label: Variant QC review, exclude_reason: GENO_CALLRATE }
-        - { key: impute, name: Impute, mode: auto }
-        - { key: ancestry, name: Ancestry PCs, mode: auto }
-        - { key: release, name: Release, mode: auto }
+        - { key: import, name: Genotypes on disk, mode: auto, output: "~/data/{study}/genomics/raw" }
+        - { key: qc, name: Sample QC review, mode: manual, role: genomics_analyst, sla_days: 5, task_label: Genotype QC, exclude_reason: GENO_QC_FAIL }
+        - { key: impute, name: Imputed, mode: auto, output: "~/data/{study}/genomics/imputed" }
+        - { key: pcs, name: Ancestry PCs, mode: auto, output: "~/data/{study}/genomics/pcs.tsv" }
     biospecimen:
-      engine: lims-sync
-      version: 1.0.0
       steps:
-        - { key: accession, name: Accession, mode: auto }
-        - { key: assay, name: Assay, mode: auto }
-        - { key: batch_qc, name: Batch QC review, mode: manual, role: lab_liaison, sla_days: 5, task_label: Assay batch review, exclude_reason: ASSAY_BATCH_FAIL }
-        - { key: release, name: Release, mode: auto }
+        - { key: import, name: Assay results on disk, mode: auto, output: "~/data/{study}/biospecimens/{visit}" }
+        - { key: qc, name: Assay batch review, mode: manual, role: lab_liaison, sla_days: 5, task_label: Assay batch review, exclude_reason: ASSAY_FAIL }
+        - { key: tabulate, name: Tabulated, mode: auto, output: "{tables_root}/biospecimens.csv" }
     assessment:
-      engine: redcap-sync
-      version: 2.3.0
       steps:
-        - { key: validate, name: Validate, mode: auto }
-        - { key: site_queries, name: Site queries, mode: manual, role: data_manager, sla_days: 10, task_label: Resolve site queries, exclude_reason: DATA_UNRESOLVABLE }
-        - { key: harmonize, name: Harmonize, mode: auto }
-        - { key: release, name: Release, mode: auto }
+        - { key: import, name: Assessment data on disk, mode: auto, output: "~/data/{study}/assessments/{visit}" }
+        - { key: qc, name: Site queries resolved, mode: manual, role: data_manager, sla_days: 10, task_label: Resolve site queries, exclude_reason: DATA_UNRESOLVABLE }
+        - { key: tabulate, name: Harmonized and tabulated, mode: auto, output: "{tables_root}/assessments.csv" }
 
 studies:
   - id: ABCD
     name: Adolescent Brain Cognitive Dev.
-    source: NDA fast-track
+    source: NDA (on disk)
+    release: "6.0"
+    visits: [baseline_year_1_arm_1, 2_year_follow_up_y_arm_1, 4_year_follow_up_y_arm_1, 6_year_follow_up_y_arm_1]
+    paths:
+      # From your machine: ABCD 6.0 concatenated data
+      concat_root: ~/2025-11-19_ABCD_concat_uncompressed/6_0/concatenated/imaging
     team: { qc_reviewer: [Priya N., Tomas H.], data_manager: [Ingrid L., Sara K.], genomics_analyst: [Marcus O.] }
-    scheduler: { max_active_runs_per_step: 3 }
     modalities:
       smri: { units: 40100 }
-      dmri:
-        units: 38200
-        engine: nextflow:abcd-dmri
-        version: 3.3.0
-        steps:
-          auto_qc: { command: "dmri_autoqc --max-motion 2.0 --min-volumes 96" }
-          preprocess: { name: Preprocess (qsiprep), command: "qsiprep --output-resolution 1.7" }
-      fmri:
-        units: 37600
-        add_steps:
-          - { key: recon, name: Offline multiband recon, mode: auto, after: validate, launch: external }
-        steps:
-          visual_qc: { sla_days: 10 }
+      dmri: { units: 38200 }
+      fmri: { units: 37600 }
       genomics: { units: 11800 }
       assessment: { units: 47300 }
-    sim: { activity: 5, released: 0.76, not_received: 0.55 }
+    sim: { activity: 5, released: 0.76, not_received: 0.15 }
 
   - id: HBCD
     name: HEALthy Brain & Child Dev.
-    source: HBCD DCC
+    source: NDA (on disk)
+    release: "2.0"
+    visits: [V02, V03, V04]
     team: { qc_reviewer: [Priya N.], data_manager: [Sara K.], lab_liaison: [Wei C.] }
-    scheduler: { qc_batch_size: 30 }
     steps:
-      visual_qc: { sla_days: 5 }
+      qc: { sla_days: 5 }
     modalities:
       smri:
         units: 9100
-        engine: nextflow:infant-mri
-        version: 1.2.0
-        add_steps:
-          - { key: infant_seg, name: Infant segmentation, mode: auto, after: auto_qc }
-      dmri: { units: 8600, engine: nextflow:infant-mri, version: 1.2.0 }
-      fmri: { units: 8000, engine: nextflow:infant-mri, version: 1.2.0 }
-      eeg:
-        units: 9500
         steps:
-          auto_qc: { name: Auto QC (HAPPE), command: "happe --infant" }
+          neuroquant: { skip: true }   # NeuroQuant norms do not cover infants
+        add_steps:
+          - { key: infant_seg, name: Infant segmentation, mode: auto, after: mmps_proc, output: "{mmps_root}/INFANTSEG_{subject}_{visit}" }
+      dmri: { units: 8600 }
+      fmri: { units: 8000 }
+      eeg: { units: 9500 }
       biospecimen: { units: 12200 }
       assessment: { units: 15400 }
-    sim: { activity: 6, released: 0.31, not_received: 0.72 }
+    sim: { activity: 6, released: 0.31, not_received: 0.25 }
 
   - id: UKB
     name: UK Biobank
-    source: UKB showcase
+    source: UKB bulk (on disk)
+    release: "2025"
+    visits: [ses-2, ses-3]
     team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
-    scheduler: { batch_size: 400, max_active_runs_per_step: 4, qc_batch_size: 200 }
+    scheduler: { qc_batch_size: 200 }
     modalities:
       smri: { units: 100000 }
       dmri: { units: 95200 }
@@ -156,79 +150,91 @@ studies:
         steps:
           impute: { skip: true }    # UKB distributes imputed genotypes
       assessment: { units: 502000 }
-    sim: { activity: 4, released: 0.71, not_received: 0.6 }
+    sim: { activity: 4, released: 0.71, not_received: 0.1 }
 
   - id: ADNI
     name: Alzheimer's Disease NI
-    source: LONI IDA
+    source: LONI IDA (on disk)
+    release: "2026-10"
+    visits: [bl, m12, m24, m48]
     team: { qc_reviewer: [Tomas H.], data_manager: [Sara K.], genomics_analyst: [Marcus O.], lab_liaison: [Wei C.] }
     modalities:
       smri: { units: 12400 }
       pet:
         units: 8100
         steps:
-          visual_qc: { sla_days: 10 }
-          suvr: { name: Centiloid, command: "centiloid --tracers PIB,FBP,FBB" }
+          qc: { sla_days: 10 }
       genomics: { units: 2500 }
       biospecimen: { units: 6200 }
       assessment: { units: 15800 }
-    sim: { activity: 3, released: 0.86, not_received: 0.5 }
+    sim: { activity: 3, released: 0.86, not_received: 0.1 }
 
   - id: PING
     name: Pediatric Imaging, Neurocog. & Genetics
     source: PING archive
+    release: "final"
+    visits: [baseline]
     team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
-    scheduler: { max_active_runs_per_step: 1, auto_retry: 0 }
     modalities:
       smri: { units: 1490 }
       dmri: { units: 1420 }
       genomics: { units: 1490 }
       assessment: { units: 1490 }
-    sim: { activity: 1, released: 0.985, not_received: 0.1 }
+    sim: { activity: 1, released: 0.985, not_received: 0.0 }
 
   - id: VETSA
     name: Vietnam Era Twin Study of Aging
     source: VETSA archive
+    release: "wave3"
+    visits: [wave1, wave2, wave3]
     team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
-    scheduler: { max_active_runs_per_step: 1, auto_retry: 0 }
     modalities:
       smri: { units: 1310 }
       dmri: { units: 1240 }
       genomics: { units: 1400 }
       assessment: { units: 4100 }
-    sim: { activity: 1, released: 0.93, not_received: 0.3 }
+    sim: { activity: 1, released: 0.93, not_received: 0.0 }
 
   - id: TOP
     name: Thematically Organized Psychosis
-    source: TSD export
+    source: TSD enclave
+    host: TSD
+    release: "2026"
+    visits: [baseline, followup]
+    # Processed inside TSD; progress is reported by CSV export (npm run import -- --csv)
+    paths:
+      raw_root: /tsd/pXX/data/durable/TOP/raw
+      mmps_root: /tsd/pXX/data/durable/TOP/mmps/proc
+      fsurf_root: /tsd/pXX/data/durable/TOP/mmps/fsurf
+      roi_root: /tsd/pXX/data/durable/TOP/derivatives/roi
+      atlas_root: /tsd/pXX/data/durable/TOP/derivatives/atlas
+      concat_root: /tsd/pXX/data/durable/TOP/concat/{release}
     team: { qc_reviewer: [Priya N.], data_manager: [Sara K.], genomics_analyst: [Marcus O.] }
-    # MRI is processed inside TSD by the site's own engine, which reports progress to the tracker
     modalities:
-      smri:
-        units: 3500
-        engine: tsd:mri-pipeline
-        version: 2.1.0
-        steps: &tsd_external
-          validate: { launch: external }
-          deidentify: { launch: external }
-          bids: { launch: external }
-          auto_qc: { launch: external }
-          preprocess: { launch: external }
-      dmri: { units: 2800, engine: tsd:mri-pipeline, version: 2.1.0, steps: *tsd_external }
-      fmri: { units: 2500, engine: tsd:mri-pipeline, version: 2.1.0, steps: *tsd_external }
+      smri: { units: 3500 }
+      dmri: { units: 2800 }
+      fmri: { units: 2500 }
       genomics: { units: 3500 }
       assessment: { units: 4000 }
-    sim: { activity: 3, released: 0.79, not_received: 0.45 }
+    sim: { activity: 3, released: 0.79, not_received: 0.05 }
 
   - id: HUNT
     name: Trøndelag Health Study
     source: HUNT Cloud
+    host: HUNT Cloud
+    release: "HUNT4"
+    visits: [HUNT4]
+    paths:
+      raw_root: /mnt/hunt-cloud/mri/raw
+      mmps_root: /mnt/hunt-cloud/mri/mmps/proc
+      fsurf_root: /mnt/hunt-cloud/mri/mmps/fsurf
+      roi_root: /mnt/hunt-cloud/mri/derivatives/roi
+      atlas_root: /mnt/hunt-cloud/mri/derivatives/atlas
     team: { qc_reviewer: [Priya N.], data_manager: [Ingrid L., Sara K.], genomics_analyst: [Marcus O.] }
-    scheduler: { batch_size: 250 }
     steps:
-      site_queries: { sla_days: 14 }
+      qc: { sla_days: 14 }
     modalities:
-      smri: { units: 1010, scheduler: { batch_size: 10 } }
+      smri: { units: 1010 }
       genomics: { units: 88000 }
       assessment: { units: 229000 }
-    sim: { activity: 3, released: 0.62, not_received: 0.5 }
+    sim: { activity: 3, released: 0.62, not_received: 0.05 }

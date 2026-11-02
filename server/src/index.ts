@@ -16,6 +16,11 @@
 //   POST  /api/workflow-runs/claim                       take the next queued run for your engines
 //   GET   /api/workflow-runs/:id                         run details (command, sessions)
 //   POST  /api/workflow-runs/:id/finish                  report success or failure
+// Paths and subjects
+//   POST  /api/locations                                 add a path inventory entry
+//   PATCH /api/locations/:id                             edit an entry (path, host, description)
+//   DELETE /api/locations/:id                            remove an entry
+//   GET   /api/units?study=&modality=&subject=&limit=    subject x visit status with per-step paths
 // Admin
 //   POST  /api/scheduler/tick                            run one scheduler pass now
 import express, { type NextFunction, type Request, type Response } from 'express';
@@ -31,6 +36,8 @@ import {
 import { triggerRun, updateItem } from './plan';
 import { claimRun, finishRun, getRun } from './runs';
 import { reconcile } from './scheduler';
+import { addLocation, deleteLocation, updateLocation } from './locations';
+import { listUnits } from './units';
 import type { ItemPatch } from '../../shared/types';
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -155,7 +162,8 @@ app.patch('/api/items/:id', h(async (req, res) => {
   const patch: ItemPatch = {};
   if ('assignee' in b) patch.assignee = b.assignee === null || b.assignee === '' ? null : str(b.assignee, 'assignee');
   if ('status' in b) patch.status = str(b.status, 'status') as ItemPatch['status'];
-  if (!('assignee' in patch) && !patch.status) throw new HttpError(400, 'Send assignee and/or status');
+  if ('output_path' in b) patch.outputPath = typeof b.output_path === 'string' ? b.output_path : null;
+  if (!('assignee' in patch) && !patch.status && !('outputPath' in patch)) throw new HttpError(400, 'Send assignee, status and/or output_path');
   await write((c) => updateItem(c, req.params.id, patch, actorOf(b)));
   res.json({ ok: true });
 }));
@@ -188,6 +196,29 @@ app.post('/api/workflow-runs/:id/finish', h(async (req, res) => {
     failedUnitIds: Array.isArray(b.failed_unit_ids) ? b.failed_unit_ids.map(Number) : undefined,
     reasonCode: typeof b.reason_code === 'string' ? b.reason_code : null,
   })));
+}));
+
+// ---------- path inventory and subjects ----------
+app.post('/api/locations', h(async (req, res) => {
+  const b = req.body as Record<string, string>;
+  const id = await write((c) => addLocation(c, b, actorOf(b)));
+  res.status(201).json({ id });
+}));
+
+app.patch('/api/locations/:id', h(async (req, res) => {
+  const b = req.body as Record<string, string>;
+  await write((c) => updateLocation(c, Number(req.params.id), b, actorOf(b)));
+  res.json({ ok: true });
+}));
+
+app.delete('/api/locations/:id', h(async (req, res) => {
+  await write((c) => deleteLocation(c, Number(req.params.id), actorOf(req.body ?? {})));
+  res.json({ ok: true });
+}));
+
+app.get('/api/units', h(async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  res.json(await listUnits(pool, { study: q.study || undefined, modality: q.modality || undefined, subject: q.subject, limit: Number(q.limit ?? 60) }));
 }));
 
 app.post('/api/scheduler/tick', h(async (_req, res) => {

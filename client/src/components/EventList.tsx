@@ -14,6 +14,7 @@ const KIND: Record<EventKind, [string, string]> = {
   item: ['item', 'warn'],
   run: ['workflow', 'run'],
   deliverable: ['deliverable', 'ok'],
+  location: ['path edit', 'accent'],
 };
 
 export function EventList({ events }: { events: TrackerEvent[] }) {

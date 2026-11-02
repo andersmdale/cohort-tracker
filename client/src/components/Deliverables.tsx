@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { MODALITY_LABEL, ROLE_LABEL } from '../../../shared/catalog';
 import type { Deliverable, DeliverableState, Raci, Snapshot, WorkItem } from '../../../shared/types';
 import { fmtDate, pctLabel } from '../lib/format';
+import { CopyButton } from './CopyButton';
 
 const STATE_LABEL: Record<DeliverableState, string> = {
   done: 'Done', in_progress: 'In progress', ready: 'Ready', blocked: 'Blocked',
@@ -13,7 +14,7 @@ const KIND_LABEL: Record<Deliverable['kind'], string> = {
 const RACI_LABEL: Record<Raci, string> = { A: 'Accountable', R: 'Responsible', C: 'Consulted', I: 'Informed' };
 
 export interface DeliverableActions {
-  updateItem: (itemId: string, patch: { assignee?: string | null; status?: 'todo' | 'in_progress' | 'done' | 'skipped' }) => void;
+  updateItem: (itemId: string, patch: { assignee?: string | null; status?: 'todo' | 'in_progress' | 'done' | 'skipped' | 'failed'; outputPath?: string | null }) => void;
   runItem: (itemId: string) => void;
 }
 
@@ -122,11 +123,14 @@ function ItemRow({ it, snapshot, me, actions, parentBlocked }: {
   it: WorkItem; snapshot: Snapshot; me: string; actions: DeliverableActions; parentBlocked: boolean;
 }) {
   const wf = it.workflowId ? snapshot.workflows.find((w) => w.id === it.workflowId) : null;
+  const reportable = it.mode === 'manual' || wf?.trigger === 'external';
   const run = it.lastRun;
   const tone = it.status === 'done' ? 'ok' : it.status === 'failed' ? 'crit' : it.status === 'in_progress' ? 'run'
     : it.status === 'ready' ? 'accent' : '';
   const label = it.status === 'in_progress' && run && (run.status === 'queued' || run.status === 'running')
     ? (run.status === 'queued' ? 'Queued' : 'Running') : it.status.replace('_', ' ');
+  const [editPath, setEditPath] = useState(false);
+  const [path, setPath] = useState(it.outputPath ?? '');
   return (
     <div className={`irow st-${it.status}`}>
       <span className="ord">{String(it.ordinal).padStart(2, '0')}</span>
@@ -134,36 +138,51 @@ function ItemRow({ it, snapshot, me, actions, parentBlocked }: {
         <div className="ititle">
           <b>{it.title}</b>
           {it.mode === 'automated'
-            ? <span className="tag auto" title={wf?.command}>{wf?.trigger === 'manual' ? 'workflow · run by hand' : 'workflow · auto'}</span>
+            ? <span className="tag auto" title={wf?.command}>{wf?.trigger === 'external' ? `script · ${wf.engine}` : wf?.trigger === 'manual' ? 'workflow · run by hand' : 'workflow · auto'}</span>
             : <span className="tag">manual</span>}
         </div>
         <div className="isub">
-          {it.mode === 'automated' && wf && <span>{wf.name} <span className="mono">({wf.engine})</span> · maintained by {wf.maintainer}</span>}
+          {it.mode === 'automated' && wf && <span>{wf.name} · maintained by {wf.maintainer}</span>}
           {it.mode === 'automated' && run && <span className="mono"> · run #{run.id} {run.status}{run.worker ? ` on ${run.worker}` : ''}{run.message ? `: ${run.message}` : ''}</span>}
           {!parentBlocked && it.blockedBy.length > 0 && <span className="blocked-why">{it.blockedBy.join(' · ')}</span>}
         </div>
+        {it.outputPath && !editPath && (
+          <div className="iout">
+            <span className="mono small" title={it.outputTemplate ?? undefined}>{it.outputPath}</span>
+            <CopyButton text={it.outputPath} />
+            <button className="btn sm" type="button" onClick={() => { setPath(it.outputPath ?? ''); setEditPath(true); }}>Edit</button>
+          </div>
+        )}
+        {editPath && (
+          <form className="iout" onSubmit={(e) => { e.preventDefault(); actions.updateItem(it.id, { outputPath: path.trim() || null }); setEditPath(false); }}>
+            <input id={`item-out-${it.id}`} aria-label={`Output path for ${it.title}`} className="mono grow" value={path} onChange={(e) => setPath(e.target.value)} />
+            <button className="btn sm primary" type="submit">Save</button>
+            <button className="btn sm" type="button" onClick={() => setEditPath(false)}>Cancel</button>
+          </form>
+        )}
       </div>
       <div className="iwho">
-        {it.mode === 'manual' ? (
-          <select id={`item-assignee-${it.id}`} aria-label={`Assignee for ${it.title}`} value={it.assignee ?? ''}
-            onChange={(e) => actions.updateItem(it.id, { assignee: e.target.value || null })}>
-            <option value="">Unassigned</option>
-            {snapshot.people.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-          </select>
-        ) : <span className="muted small">{wf?.maintainer}</span>}
+        <select id={`item-assignee-${it.id}`} aria-label={`Assignee for ${it.title}`} value={it.assignee ?? ''}
+          onChange={(e) => actions.updateItem(it.id, { assignee: e.target.value || null })}>
+          <option value="">Unassigned</option>
+          {snapshot.people.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+        </select>
       </div>
       <div className="iact">
         <span className={`chip ${tone}`}>{label}</span>
-        {it.mode === 'manual' && it.status === 'ready' && (
+        {reportable && it.status === 'ready' && (
           <button className="btn sm" type="button" onClick={() => actions.updateItem(it.id, { status: 'in_progress', ...(it.assignee ? {} : { assignee: me }) })}>Start</button>
         )}
-        {it.mode === 'manual' && (it.status === 'ready' || it.status === 'in_progress') && (
+        {reportable && (it.status === 'ready' || it.status === 'in_progress' || it.status === 'failed') && (
           <button className="btn sm primary" type="button" onClick={() => actions.updateItem(it.id, { status: 'done' })}>Mark done</button>
         )}
-        {it.mode === 'automated' && it.status === 'failed' && (
+        {reportable && it.mode === 'automated' && it.status === 'in_progress' && (
+          <button className="btn sm" type="button" onClick={() => actions.updateItem(it.id, { status: 'failed' })}>Failed</button>
+        )}
+        {!reportable && it.mode === 'automated' && it.status === 'failed' && (
           <button className="btn sm" type="button" onClick={() => actions.runItem(it.id)}>Retry</button>
         )}
-        {it.mode === 'automated' && it.status === 'ready' && wf?.trigger === 'manual' && (
+        {!reportable && it.mode === 'automated' && it.status === 'ready' && wf?.trigger === 'manual' && (
           <button className="btn sm primary" type="button" onClick={() => actions.runItem(it.id)}>Run</button>
         )}
       </div>
@@ -188,7 +207,7 @@ function DeliverableDetail({ d, snapshot, me, onSelect, actions }: {
       {d.description && <p className="small muted">{d.description}</p>}
       <div className="endcaps">
         <div><span className="label">Owner</span><b className="plain">{d.owner}</b></div>
-        <div><span className="label">Due</span><b>{d.dueDate ? fmtDate(d.dueDate) : '—'}</b></div>
+        <div><span className="label">Due{d.release ? ` · release ${d.release}` : ''}</span><b>{d.dueDate ? fmtDate(d.dueDate) : '—'}</b></div>
         <div><span className="label">Items done</span><b>{d.done}/{d.total}</b></div>
       </div>
 
@@ -224,8 +243,11 @@ function DeliverableDetail({ d, snapshot, me, onSelect, actions }: {
             const p = pipe(g.pipelineId);
             return (
               <div className="gate" key={g.pipelineId}>
-                <span className="gname">{p ? `${p.study} ${MODALITY_LABEL[p.modality]}` : g.pipelineId}</span>
-                <span className="gbar" title={`${pctLabel(g.current * 100)} released; needs ${pctLabel(g.threshold * 100)}`}>
+                <span className="gname">
+                  {p ? `${p.study} ${MODALITY_LABEL[p.modality]}` : g.pipelineId}
+                  <span className="small muted"> {g.stepKey ? `past ${p?.steps.find((s) => s.key === g.stepKey)?.name ?? g.stepKey}` : 'complete'}</span>
+                </span>
+                <span className="gbar" title={`${pctLabel(g.current * 100)} done; needs ${pctLabel(g.threshold * 100)}`}>
                   <i className={g.met ? 'met' : ''} style={{ width: `${Math.min(100, g.current * 100)}%` }} />
                   <b style={{ left: `${g.threshold * 100}%` }} />
                 </span>

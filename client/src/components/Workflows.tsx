@@ -49,14 +49,15 @@ export function WorkflowsView({ snapshot, now }: { snapshot: Snapshot; now: numb
   return (
     <div className="stack">
       <div className="panel prose">
-        <h2>What starts automatically</h2>
+        <h2>Scripts and who runs them</h2>
         <p>
-          The scheduler checks every few seconds. Units waiting at an automated pipeline step are batched into processing runs,
-          up to each study's run limit. Units reaching a review step are batched and assigned to the least-loaded reviewer on that
-          study's team. A deliverable's workflow items start as soon as its upstream deliverables are done, its pipeline gates are met
-          and earlier items have finished. Workflows marked “run by hand” wait for someone to press Run. Workers pick up queued runs by engine.
+          The tracker records work rather than launching it. Each release-level item names the script that produces it and the
+          person who runs it; it shows up in that person's task list once its dependencies are met. Marking it done, or
+          <span className="mono"> npm run scan</span> finding its output path on disk, completes it. Per-subject progress
+          (MMPS, FreeSurfer, NeuroQuant, ROI extraction, atlas registration) comes from the scan of each step's output path.
+          Scripts can later be switched to launch through a worker (<span className="mono">trigger: on_ready</span>).
         </p>
-        {external.length > 0 && <p className="small muted">Run by the studies' own engines (reported, not launched): {external.slice(0, 8).join(', ')}{external.length > 8 ? `, and ${external.length - 8} more` : ''}.</p>}
+        {external.length > 0 && <p className="small muted">Studies processed in their own enclave: {[...new Set(snapshot.pipelines.filter((p) => snapshot.studies.find((s) => s.id === p.study)?.host !== 'local').map((p) => p.study))].join(', ') || 'none'}.</p>}
       </div>
       <div className="stack">
         <div className="panel">
@@ -70,20 +71,23 @@ export function WorkflowsView({ snapshot, now }: { snapshot: Snapshot; now: numb
         </div>
       </div>
       <div className="panel">
-        <div className="panel-head"><h2>Workflow catalog</h2><span className="label">trigger · maintainer · last runs · success</span></div>
+        <div className="panel-head"><h2>Script catalog</h2><span className="label">trigger · maintainer · items</span></div>
         <div className="scroll">
           <table className="wf">
-            <thead><tr><th>Workflow</th><th>Engine</th><th>Trigger</th><th>Maintainer</th><th>Used by</th><th>Recent runs</th><th className="right">Success</th></tr></thead>
+            <thead><tr><th>Workflow</th><th>Engine</th><th>Trigger</th><th>Maintainer</th><th>Used by</th><th>Done / open</th><th className="right">Launched runs</th></tr></thead>
             <tbody>
               {snapshot.workflows.map((w) => (
                 <tr key={w.id}>
                   <td><b>{w.name}</b><div className="mono small muted" title={w.command}>{w.id}</div></td>
                   <td className="mono small">{w.engine}</td>
-                  <td><span className={`chip ${w.trigger === 'on_ready' ? 'accent' : 'warn'}`}>{w.trigger === 'on_ready' ? 'auto when ready' : 'run by hand'}</span></td>
+                  <td><span className={`chip ${w.trigger === 'on_ready' ? 'accent' : w.trigger === 'manual' ? 'warn' : ''}`}>{w.trigger === 'on_ready' ? 'auto when ready' : w.trigger === 'manual' ? 'launch by hand' : 'run by operator'}</span></td>
                   <td>{w.maintainer}</td>
                   <td className="mono small">{w.usedBy.length} item{w.usedBy.length === 1 ? '' : 's'}</td>
-                  <td><span className="dots">{w.recentRuns.slice(0, 8).reverse().map((r) => <i key={r.id} className={`d-${r.status}`} title={`#${r.id} ${r.status}`} />)}</span></td>
-                  <td className="mono small right">{w.successRate === null ? '—' : `${Math.round(w.successRate * 100)}%`}</td>
+                  <td className="mono small">{(() => {
+                    const its = snapshot.deliverables.flatMap((d) => d.items).filter((i) => i.workflowId === w.id);
+                    return `${its.filter((i) => i.status === 'done').length} / ${its.filter((i) => i.status !== 'done' && i.status !== 'skipped').length}`;
+                  })()}</td>
+                  <td className="right"><span className="dots">{w.recentRuns.slice(0, 8).reverse().map((r) => <i key={r.id} className={`d-${r.status}`} title={`#${r.id} ${r.status}`} />)}</span>{!w.recentRuns.length && <span className="muted small">—</span>}</td>
                 </tr>
               ))}
             </tbody>

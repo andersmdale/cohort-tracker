@@ -31,12 +31,28 @@ export const ROLE_LABEL: Record<Role, string> = {
   lab_liaison: 'Lab liaison',
 };
 
-export type PipelineKind = 'mri' | 'pet' | 'eeg' | 'genomics' | 'biospecimen' | 'assessment';
+export type PipelineKind = ModalityKey;
 
+/** Each modality has its own default pipeline in studies.yaml. */
 export const MODALITY_KIND: Record<ModalityKey, PipelineKind> = {
-  smri: 'mri', dmri: 'mri', fmri: 'mri', pet: 'pet', eeg: 'eeg',
+  smri: 'smri', dmri: 'dmri', fmri: 'fmri', pet: 'pet', eeg: 'eeg',
   genomics: 'genomics', biospecimen: 'biospecimen', assessment: 'assessment',
 };
+
+// ---------- path templates ----------
+
+/**
+ * Fill a path template. Placeholders: any study path root ({raw_root}, {mmps_root}, ...),
+ * plus {study}, {subject}, {visit}, {modality}, {release}, {deliverable}. Roots may themselves use placeholders.
+ * Unknown placeholders are left in place so they are easy to spot.
+ */
+export function renderPath(template: string, vars: Record<string, string | null | undefined>): string {
+  let out = template;
+  for (let i = 0; i < 4 && /\{[a-z_]+\}/.test(out); i++) {
+    out = out.replace(/\{([a-z_]+)\}/g, (m, k: string) => (vars[k] ?? m) as string);
+  }
+  return out;
+}
 
 export interface PersonDef { name: string; role: Role }
 

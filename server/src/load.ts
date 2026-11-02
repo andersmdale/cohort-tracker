@@ -1,5 +1,6 @@
 // Apply edits to the YAML files on a live database.
-//   npm run config:load              # shared/studies.yaml: names, engines, commands, SLAs, launch, scheduler settings, teams
+//   npm run config:load              # shared/studies.yaml: names, engines, commands, outputs, SLAs, launch, settings, teams, new paths
+//   npm run config:load -- --paths   # also overwrite path inventory entries edited on the dashboard
 //   npm run plan:load                # shared/plan.yaml: deliverables, dependencies, owners, items, workflows
 //   npm run plan:load -- --prune     # also delete deliverables, items and workflows no longer in the file
 import { pool, tx } from './db';
@@ -13,8 +14,10 @@ const prune = process.argv.includes('--prune');
 async function main() {
   if (what === 'config') {
     const cfg = readConfig();
-    const n = await tx((c) => updateFromConfig(c, cfg));
-    console.log(`Updated ${n} pipelines across ${cfg.studies.length} studies from studies.yaml.`);
+    const overwritePaths = process.argv.includes('--paths');
+    const r = await tx((c) => updateFromConfig(c, cfg, { overwritePaths }));
+    console.log(`Updated ${r.pipelines} pipelines across ${cfg.studies.length} studies from studies.yaml; ` +
+      (overwritePaths ? `path inventory overwritten (${r.locations} entries).` : `${r.locations} new path entries added (edited entries kept; use --paths to overwrite).`));
   } else if (what === 'plan') {
     const r = await tx((c) => loadPlanFile(c, { prune }));
     console.log(`Loaded ${r.deliverables} deliverables, ${r.items} items, ${r.workflows} workflows from plan.yaml${prune ? `; pruned ${r.pruned}` : ''}.`);

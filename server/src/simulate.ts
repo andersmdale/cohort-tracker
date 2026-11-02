@@ -86,10 +86,12 @@ async function colleagues() {
         ORDER BY random() LIMIT 1`);
     if (t.rowCount) await tx((c) => completeTask(c, Number(t.rows[0].task_id), t.rows[0].assignee));
   }
-  if (Math.random() < 0.06) {
+  if (Math.random() < 0.12) {
     const plan = await currentPlan(pool);
+    const external = new Set(plan.workflows.filter((w) => w.trigger === 'external').map((w) => w.id));
     const items = plan.deliverables.flatMap((d) => d.items).filter((i) =>
-      i.mode === 'manual' && i.assignee && i.assignee !== 'You' && (i.status === 'ready' || i.status === 'in_progress'));
+      (i.mode === 'manual' || external.has(i.workflowId ?? '')) && i.assignee && i.assignee !== 'You'
+      && (i.status === 'ready' || i.status === 'in_progress'));
     if (items.length) {
       const it = pick(items);
       await tx((c) => updateItem(c, it.id, { status: it.status === 'ready' ? 'in_progress' : 'done' }, it.assignee!));
@@ -113,7 +115,7 @@ async function main() {
     (async () => {
       const p = pick(weighted);
       if (Math.random() < 0.25) await sources(p);
-      await externalEngines(pick(weighted));
+      for (let k = 0; k < 3; k++) await externalEngines(pick(weighted));
       await worker();
       await colleagues();
     })().catch((e) => console.error('tick failed:', e.message)).finally(() => { busy = false; });

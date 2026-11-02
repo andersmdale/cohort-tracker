@@ -14,7 +14,8 @@ export type EventKind =
   | 'retry'       // failed units were requeued
   | 'item'        // a deliverable work item changed status
   | 'run'         // a workflow run was queued, started or finished
-  | 'deliverable'; // a deliverable was unblocked, completed or changed owner
+  | 'deliverable' // a deliverable was unblocked, completed or changed owner
+  | 'location';   // the path inventory was edited
 
 export interface StepStatus {
   key: string;
@@ -25,6 +26,8 @@ export interface StepStatus {
   slaDays: number | null;
   /** Who starts processing at an automated step. */
   launch: 'scheduler' | 'external';
+  /** Output path template; its existence on disk marks the step done. */
+  output: string | null;
   queued: number;
   running: number;
   failed: number;
@@ -82,7 +85,37 @@ export interface TrackerEvent {
 
 export interface Person { name: string; role: Role }
 
-export interface StudySummary { id: string; name: string; source: string; team: { person: string; role: Role }[] }
+export interface StudySummary {
+  id: string; name: string; source: string; host: string; release: string; visits: string[];
+  team: { person: string; role: Role }[];
+}
+
+/** One entry of the editable path inventory. */
+export interface DataLocation {
+  id: number;
+  study: string;
+  modality: ModalityKey | null;   // null = all modalities of the study
+  key: string;                    // raw_root, mmps_root, ...
+  path: string;
+  host: string;
+  description: string | null;
+  updatedBy: string | null;
+  updatedAt: string;
+}
+
+/** One subject x visit in one pipeline, for the subject browser. */
+export interface UnitRow {
+  unitId: number;
+  pipelineId: string;
+  study: string;
+  modality: ModalityKey;
+  subject: string;
+  visit: string;
+  stepKey: string | null;
+  state: UnitState;
+  /** Output path per step, from the inventory (or recorded by import/scan when it differs). */
+  paths: { stepKey: string; stepName: string; path: string | null; passed: boolean }[];
+}
 
 // ---------- deliverables ----------
 
@@ -96,9 +129,9 @@ export type DeliverableState = 'blocked' | 'ready' | 'in_progress' | 'done';
 export type Risk = 'ok' | 'at_risk' | 'late';
 export type Raci = 'R' | 'A' | 'C' | 'I';
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-export type WorkflowTrigger = 'on_ready' | 'manual';
+export type WorkflowTrigger = 'external' | 'on_ready' | 'manual';
 
-export interface Gate { pipelineId: string; threshold: number; current: number; met: boolean }
+export interface Gate { pipelineId: string; stepKey: string | null; threshold: number; current: number; met: boolean }
 
 /** A deliverable run (workflowId + itemId) or a processing run (pipelineId + stepKey + n units). */
 export interface WorkflowRun {
@@ -132,6 +165,9 @@ export interface WorkItem {
   after: string[];       // item ids
   blockedBy: string[];   // readable reasons
   lastRun: WorkflowRun | null;
+  outputTemplate: string | null;
+  /** outputTemplate filled from the current path inventory. */
+  outputPath: string | null;
 }
 
 export interface Deliverable {
@@ -142,6 +178,7 @@ export interface Deliverable {
   description: string | null;
   owner: string;
   dueDate: string | null;
+  release: string | null;
   raci: { person: string; role: Raci }[];
   dependsOn: string[];
   neededBy: string[];
@@ -178,6 +215,7 @@ export interface Snapshot {
   deliverables: Deliverable[];
   workflows: Workflow[];
   runs: WorkflowRun[];   // newest first
+  locations: DataLocation[];
 }
 
-export interface ItemPatch { assignee?: string | null; status?: 'todo' | 'in_progress' | 'done' | 'skipped' }
+export interface ItemPatch { assignee?: string | null; status?: 'todo' | 'in_progress' | 'done' | 'skipped' | 'failed'; outputPath?: string | null }

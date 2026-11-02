@@ -10,10 +10,10 @@ export function KpiStrip({ snapshot, now }: { snapshot: Snapshot; now: number })
   const fl = sum(P.map(failed));
   const overdue = snapshot.tasks.filter((t) => dueState(t, now) === 'overdue').length;
   const kpis: { label: string; value: string; sub: string; alert?: boolean }[] = [
-    { label: 'Units expected', value: fmt(E), sub: `${snapshot.studies.length} studies · ${P.length} pipelines` },
-    { label: 'Released', value: pctLabel(pct(rel, E)), sub: `${fmt(rel)} units` },
-    { label: 'In flight', value: fmt(sum(P.map(inFlight))), sub: `${fmt(sum(P.map((p) => p.notReceived)))} not yet received` },
-    { label: 'Failed', value: fmt(fl), sub: 'awaiting retry', alert: fl > 0 },
+    { label: 'Subject-visits', value: fmt(E), sub: `${snapshot.studies.length} studies · ${P.length} pipelines` },
+    { label: 'Complete', value: pctLabel(pct(rel, E)), sub: `${fmt(rel)} subject-visits` },
+    { label: 'In progress', value: fmt(sum(P.map(inFlight))), sub: `${fmt(sum(P.map((p) => p.notReceived)))} not on disk yet` },
+    { label: 'Failed', value: fmt(fl), sub: 'need attention', alert: fl > 0 },
     { label: 'Open batches', value: String(snapshot.tasks.length), sub: `${fmt(sum(snapshot.tasks.map((t) => t.n)))} units on people` },
     { label: 'Overdue', value: String(overdue), sub: 'past SLA', alert: overdue > 0 },
   ];
@@ -64,7 +64,7 @@ export function Heatmap({ snapshot, selected, onSelect }: {
                         className={`cell${v > 58 ? ' dark' : ''}`}
                         style={{ '--p': v.toFixed(1) } as React.CSSProperties}
                         aria-pressed={p.id === selected}
-                        aria-label={`${s.id} ${m.label}: ${v.toFixed(1)}% released`}
+                        aria-label={`${s.id} ${m.label}: ${v.toFixed(1)}% complete`}
                         onClick={() => onSelect(p.id)}
                       >
                         <span className="pct">{pctLabel(v)}</span>
@@ -95,15 +95,15 @@ export function PipelineDetail({ pipeline: p, onRetry }: {
     <div className="panel">
       <div className="panel-head">
         <div>
-          <span className="label">{p.source} → {p.engine}@{p.version}</span>
+          <span className="label">{p.source} · {p.engine}</span>
           <h2 className="detail-title">{p.study} · {MODALITY_LABEL[p.modality]}</h2>
         </div>
-        <span className={`chip ${v > 95 ? 'ok' : 'run'}`}>{pctLabel(v)} released</span>
+        <span className={`chip ${v > 95 ? 'ok' : 'run'}`}>{pctLabel(v)} complete</span>
       </div>
       <div className="endcaps">
         <div><span className="label">Expected</span><b>{fmt(p.expected)}</b></div>
-        <div><span className="label">Not received</span><b>{fmt(p.notReceived)}</b></div>
-        <div><span className="label">Released</span><b>{fmt(p.released)}</b></div>
+        <div><span className="label">Not on disk</span><b>{fmt(p.notReceived)}</b></div>
+        <div><span className="label">Complete</span><b>{fmt(p.released)}</b></div>
       </div>
       <div className="steps">
         {p.steps.map((s) => (
@@ -112,8 +112,9 @@ export function PipelineDetail({ pipeline: p, onRetry }: {
             <span className="nm">
               {s.name}
               {s.mode === 'manual' && <span className="tag">manual</span>}
-              {s.mode === 'auto' && s.launch === 'external' && <span className="tag ext" title="Run by the study's own engine, which reports progress to the tracker">external</span>}
+              {s.mode === 'auto' && s.launch === 'scheduler' && <span className="tag auto" title="Launched by the tracker through a worker">launched</span>}
               {s.activeRuns > 0 && <span className="runs-t" title="Processing runs launched by the scheduler">{s.activeRuns}/{p.settings.maxActiveRuns} runs</span>}
+              {s.output && <span className="sout mono" title="Output path template; its existence marks the step done">{s.output}</span>}
             </span>
             <span className="cnt">
               {fmt(s.queued)}
@@ -137,10 +138,9 @@ export function PipelineDetail({ pipeline: p, onRetry }: {
         {p.excluded > 0 && <span>{fmt(p.excluded)} excluded</span>}
       </div>
       <div className="settings-line">
-        <span>Batch {p.settings.batchSize} units</span>
-        <span>≤{p.settings.maxActiveRuns} runs per step</span>
-        <span>{p.settings.autoRetry ? `Auto-retry ×${p.settings.autoRetry}` : 'No auto-retry'}</span>
+        <span>Progress recorded by <span className="mono">npm run scan</span> and reviewers</span>
         <span>Review batches of {p.settings.qcBatchSize}</span>
+        {p.steps.some((s) => s.mode === 'auto' && s.launch === 'scheduler') && <span>Batch {p.settings.batchSize} units · ≤{p.settings.maxActiveRuns} runs per step</span>}
       </div>
     </div>
   );
@@ -157,12 +157,12 @@ export function OverviewView({ snapshot, now, selected, onSelect, onRetry }: {
       <div className="grid2">
         <div className="panel">
           <div className="panel-head">
-            <h2>Released, by study and modality</h2>
+            <h2>Complete, by study and modality</h2>
             <span className="label">Select a cell for its pipeline</span>
           </div>
           <Heatmap snapshot={snapshot} selected={pipeline?.id ?? ''} onSelect={onSelect} />
           <div className="legend">
-            <span><span className="ramp" /> 0–100% of expected units released</span>
+            <span><span className="ramp" /> 0–100% of subject-visits through every step</span>
             <span><b className="crit-t mono">✕n</b> failed units</span>
             <span><b className="warn-t mono">◷n</b> waiting on a person</span>
           </div>

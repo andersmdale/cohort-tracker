@@ -11,7 +11,10 @@
     "plan:load": "tsx src/load.ts plan",
     "simulate": "tsx src/simulate.ts",
     "worker": "tsx src/worker.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import": "tsx src/import.ts",
+    "scan": "tsx src/scan.ts",
+    "db:init": "tsx src/seed.ts --reset --empty"
   },
   "dependencies": {
     "express": "4.21.2",

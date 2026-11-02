@@ -1,10 +1,14 @@
 import { useState } from 'react';
 import { MODALITY_LABEL, ROLE_LABEL } from '../../../shared/catalog';
-import type { ItemPatch, Snapshot } from '../../../shared/types';
+import type { ItemPatch, Snapshot, WorkItem } from '../../../shared/types';
 import { ageDays, dueState, fmt, fmtDate, itemOverdue, sum } from '../lib/format';
 import { Segmented } from './Segmented';
 
 type Filter = 'all' | 'mine' | 'unassigned' | 'overdue';
+
+/** Work a person does or runs: manual items, and scripts run outside the tracker. */
+export const isPersonTask = (i: WorkItem, s: Snapshot) =>
+  i.mode === 'manual' || s.workflows.find((w) => w.id === i.workflowId)?.trigger === 'external';
 
 export function WorkQueueView({ snapshot, now, me, onAssign, onComplete, onItem, onOpenDeliverable }: {
   snapshot: Snapshot; now: number; me: string;
@@ -25,9 +29,9 @@ export function WorkQueueView({ snapshot, now, me, onAssign, onComplete, onItem,
 
   // Manual deliverable items: what people can act on now, plus (for "Mine") what is coming up
   const rows = snapshot.deliverables.flatMap((d) => d.items
-    .filter((i) => i.mode === 'manual' && i.status !== 'done' && i.status !== 'skipped')
+    .filter((i) => isPersonTask(i, snapshot) && i.status !== 'done' && i.status !== 'skipped')
     .map((i) => ({ d, i, due: i.dueDate ?? d.dueDate })));
-  let items = rows.filter(({ i }) => i.status === 'ready' || i.status === 'in_progress' || filter === 'mine');
+  let items = rows.filter(({ i }) => i.status === 'ready' || i.status === 'in_progress' || i.status === 'failed' || filter === 'mine');
   if (study !== 'all') items = items.filter(({ d }) => d.study === study);
   if (filter === 'mine') items = items.filter(({ i }) => i.assignee === me);
   if (filter === 'unassigned') items = items.filter(({ i }) => !i.assignee);
@@ -62,7 +66,8 @@ export function WorkQueueView({ snapshot, now, me, onAssign, onComplete, onItem,
                 <span className="sev" />
                 <div className="what">
                   <b>{i.title}</b> · <button type="button" className="linkish" onClick={() => onOpenDeliverable(d.id)}>{d.title}</button>
-                  <div>{i.status === 'blocked' ? i.blockedBy.join(' · ') : `Owner ${d.owner}${d.study ? ` · ${d.study}` : ''}`}</div>
+                  <div>{i.status === 'blocked' ? i.blockedBy.join(' · ') : `${i.mode === 'automated' ? 'Run script' : 'Task'} · owner ${d.owner}${d.study ? ` · ${d.study}` : ''}`}</div>
+                  {i.outputPath && i.status !== 'blocked' && <div className="mono">→ {i.outputPath}</div>}
                 </div>
                 <div className="age">
                   <span className={`chip ${late ? 'crit' : i.status === 'in_progress' ? 'run' : i.status === 'ready' ? 'accent' : ''}`}>
@@ -137,7 +142,7 @@ export function WorkQueueView({ snapshot, now, me, onAssign, onComplete, onItem,
 
 function TeamLoad({ snapshot, now }: { snapshot: Snapshot; now: number }) {
   const openItems = snapshot.deliverables.flatMap((d) => d.items
-    .filter((i) => i.mode === 'manual' && i.status !== 'done' && i.status !== 'skipped')
+    .filter((i) => isPersonTask(i, snapshot) && i.status !== 'done' && i.status !== 'skipped')
     .map((i) => ({ i, due: i.dueDate ?? d.dueDate })));
   const owned = (name: string) => snapshot.deliverables.filter((d) => d.owner === name && d.state !== 'done').length;
   const rows = [

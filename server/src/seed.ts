@@ -19,12 +19,26 @@ const flag = (name: string) => {
   return args[i].includes('=') ? args[i].split('=')[1] : args[i + 1];
 };
 const reset = args.includes('--reset');
+// --empty: schema, studies, path inventory and plan only; register real data with `npm run import`
+const empty = args.includes('--empty');
 const scale = Number(flag('--scale') ?? 0.05);
 if (!(scale > 0 && scale <= 1)) throw new Error('--scale must be between 0 and 1');
 
 const schemaSql = readFileSync(new URL('../sql/schema.sql', import.meta.url), 'utf8');
 const rand = mulberry32(20261101);
 const scaled = (p: ResolvedPipeline) => Math.max(20, Math.round(p.units * scale));
+
+// Demo subject ids in each study's usual style (g = 1..n)
+const SUBJECT_SQL: Record<string, string> = {
+  ABCD: `'NDARINV' || upper(substr(md5('abcd' || g), 1, 8))`,
+  HBCD: `'sub-' || upper(substr(md5('hbcd' || g), 1, 10))`,
+  UKB: `(1000000 + g * 7)::text`,
+  ADNI: `lpad(((g % 140) + 2)::text, 3, '0') || '_S_' || lpad(g::text, 4, '0')`,
+  PING: `'P' || lpad(g::text, 4, '0')`,
+  VETSA: `(20000 + g)::text`,
+  TOP: `'TOP' || lpad(g::text, 5, '0')`,
+  HUNT: `'H' || lpad((g * 13)::text, 7, '0')`,
+};
 
 async function main() {
   const cfg = readConfig(); // validate before touching the database
@@ -37,20 +51,23 @@ async function main() {
 
   await tx((c) => createFromConfig(c, cfg, scaled));
 
-  for (const s of cfg.studies) {
+  for (const s of empty ? [] : cfg.studies) {
     const t0 = Date.now();
     await tx(async (c) => {
       const nSessions = Math.max(...s.pipelines.map(scaled));
+      const nSubjects = Math.ceil(nSessions / s.visits.length);
+      const subj = SUBJECT_SQL[s.id] ?? `'sub-' || lpad(g::text, 6, '0')`;
       await c.query(
         `INSERT INTO participant (study_id, participant_id, site)
-         SELECT $1, 'P' || lpad(g::text, 7, '0'), 'site-' || ((g % 12) + 1) FROM generate_series(1, $2) g`,
-        [s.id, nSessions],
+         SELECT DISTINCT ON (1, 2) $1, ${subj}, 'site-' || ((g % 12) + 1) FROM generate_series(1, $2) g ON CONFLICT DO NOTHING`,
+        [s.id, nSubjects],
       );
       await c.query(
         `INSERT INTO session (session_id, study_id, participant_id, visit)
-         SELECT $1 || '/P' || lpad(g::text, 7, '0') || '/ses-1', $1, 'P' || lpad(g::text, 7, '0'), 'ses-1'
-           FROM generate_series(1, $2) g`,
-        [s.id, nSessions],
+         SELECT $1 || '/' || ${subj} || '/' || v, $1, ${subj}, v
+           FROM generate_series(1, $2) g, unnest($3::text[]) v
+         ON CONFLICT DO NOTHING`,
+        [s.id, nSubjects, s.visits],
       );
       for (const p of s.pipelines) {
         // Lay units out over sessions in contiguous segments: [step, state, count]
@@ -92,6 +109,7 @@ async function main() {
     console.log(`${s.id.padEnd(6)} seeded in ${Date.now() - t0} ms`);
   }
 
+  if (empty) console.log('Empty database: studies, path inventory and plan loaded. Register data with npm run import.');
   const plan = await tx((c) => loadPlanFile(c));
   console.log(`Plan: ${plan.deliverables} deliverables, ${plan.items} items, ${plan.workflows} workflows.`);
   // Record initial deliverable states; the scheduler takes it from here.

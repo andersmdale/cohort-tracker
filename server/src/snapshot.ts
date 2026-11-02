@@ -4,12 +4,13 @@ import type {
   PipelineStatus, Snapshot, StepStatus, Task, TrackerEvent, Person, StudySummary,
 } from '../../shared/types';
 import type { ModalityKey, PipelineKind, Role } from '../../shared/catalog';
-import { computePlan } from '../../shared/plan';
-import { loadRawPlan } from './plan';
+import { computePlan, progressFromPipelines } from '../../shared/plan';
+import { loadRawPlan, outputRenderer } from './plan';
+import type { DataLocation } from '../../shared/types';
 
 export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot> {
-  const [studies, people, pipes, steps, counts, tasks, events, active, raw] = await Promise.all([
-    db.query<StudySummary>(`SELECT s.study_id AS id, s.name, s.source,
+  const [studies, people, pipes, steps, counts, tasks, events, active, raw, locs, render] = await Promise.all([
+    db.query<StudySummary>(`SELECT s.study_id AS id, s.name, s.source, s.host, COALESCE(s.release, '') AS release, s.visits,
                                    COALESCE(json_agg(json_build_object('person', t.person, 'role', t.role)
                                             ORDER BY t.role, t.person) FILTER (WHERE t.person IS NOT NULL), '[]') AS team
                               FROM study s LEFT JOIN study_team t USING (study_id)
@@ -18,7 +19,7 @@ export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot>
     db.query(`SELECT p.pipeline_id, p.study_id, p.modality, p.kind, p.engine, p.version, s.source,
                      p.batch_size, p.max_active_runs, p.auto_retry, p.qc_batch_size
                 FROM pipeline p JOIN study s USING (study_id) ORDER BY p.pipeline_id`),
-    db.query(`SELECT pipeline_id, step_key, ordinal, name, mode, role, sla_days, launch FROM step ORDER BY pipeline_id, ordinal`),
+    db.query(`SELECT pipeline_id, step_key, ordinal, name, mode, role, sla_days, launch, output FROM step ORDER BY pipeline_id, ordinal`),
     db.query(`SELECT pipeline_id, step_key, state, count(*)::int AS n FROM work_unit GROUP BY 1, 2, 3`),
     db.query(`SELECT t.task_id, t.pipeline_id, t.step_key, cardinality(t.unit_ids) AS n, t.assignee,
                      t.created_at, t.due_at, p.study_id, p.modality, s.name AS step_name,
@@ -36,6 +37,10 @@ export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot>
     db.query(`SELECT pipeline_id, step_key, count(*)::int AS n FROM workflow_run
                WHERE status IN ('queued','running') AND pipeline_id IS NOT NULL GROUP BY 1, 2`),
     loadRawPlan(db),
+    db.query(`SELECT l.location_id, l.study_id, l.modality, l.key, l.path, l.host, l.description, l.updated_by, l.updated_at
+                FROM data_location l JOIN study s USING (study_id)
+               ORDER BY s.sort_order, l.modality NULLS FIRST, l.key`),
+    outputRenderer(db),
   ]);
 
   const byPipe = new Map<string, PipelineStatus>();
@@ -51,7 +56,7 @@ export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot>
   for (const r of steps.rows) {
     const s: StepStatus = {
       key: r.step_key, name: r.name, ordinal: r.ordinal, mode: r.mode,
-      role: (r.role as Role | null) ?? null, slaDays: r.sla_days, launch: r.launch, queued: 0, running: 0, failed: 0,
+      role: (r.role as Role | null) ?? null, slaDays: r.sla_days, launch: r.launch, output: r.output, queued: 0, running: 0, failed: 0,
       activeRuns: 0,
     };
     byPipe.get(r.pipeline_id)?.steps.push(s);
@@ -91,8 +96,11 @@ export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot>
   }));
 
   const pipelines = [...byPipe.values()];
-  const released = Object.fromEntries(pipelines.map((p) => [p.id, p.expected ? p.released / p.expected : 0]));
-  const plan = computePlan(raw, released, Date.now());
+  const plan = computePlan(raw, progressFromPipelines(pipelines), Date.now(), render);
+  const locations: DataLocation[] = locs.rows.map((r) => ({
+    id: Number(r.location_id), study: r.study_id, modality: r.modality, key: r.key, path: r.path, host: r.host,
+    description: r.description, updatedBy: r.updated_by, updatedAt: new Date(r.updated_at).toISOString(),
+  }));
 
   return {
     generatedAt: new Date().toISOString(),
@@ -104,5 +112,6 @@ export async function buildSnapshot(db: Db, eventLimit = 200): Promise<Snapshot>
     deliverables: plan.deliverables,
     workflows: plan.workflows,
     runs: raw.runs.slice(0, 150),
+    locations,
   };
 }

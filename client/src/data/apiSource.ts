@@ -1,5 +1,5 @@
-import type { ItemPatch, Snapshot } from '../../../shared/types';
-import { BaseSource, type TrackerSource } from './source';
+import type { ItemPatch, Snapshot, UnitRow } from '../../../shared/types';
+import { BaseSource, type LocationPatch, type TrackerSource } from './source';
 
 /** Reads the snapshot from the server and refreshes it whenever the SSE stream reports a change. */
 export class ApiSource extends BaseSource implements TrackerSource {
@@ -70,8 +70,27 @@ export class ApiSource extends BaseSource implements TrackerSource {
   completeTask = (taskId: number, actor: string) =>
     this.call(`/api/tasks/${taskId}/complete`, 'POST', { actor });
 
-  updateItem = (itemId: string, patch: ItemPatch, actor: string) =>
-    this.call(`/api/items/${encodeURIComponent(itemId)}`, 'PATCH', { ...patch, actor });
+  updateItem = (itemId: string, patch: ItemPatch, actor: string) => {
+    const { outputPath, ...rest } = patch;
+    return this.call(`/api/items/${encodeURIComponent(itemId)}`, 'PATCH',
+      { ...rest, ...(outputPath !== undefined ? { output_path: outputPath } : {}), actor });
+  };
+
+  addLocation = (entry: LocationPatch, actor: string) => this.call('/api/locations', 'POST', { ...entry, actor });
+
+  updateLocation = (id: number, patch: LocationPatch, actor: string) => this.call(`/api/locations/${id}`, 'PATCH', { ...patch, actor });
+
+  deleteLocation = (id: number, actor: string) => this.call(`/api/locations/${id}`, 'DELETE', { actor });
+
+  fetchUnits = async (q: { study?: string; modality?: string; subject?: string }) => {
+    const params = new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][]);
+    const r = await fetch(`${this.base}/api/units?${params}`);
+    if (!r.ok) {
+      const err = (await r.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(err?.error ?? `Request failed (${r.status})`);
+    }
+    return (await r.json()) as UnitRow[];
+  };
 
   runItem = (itemId: string, actor: string) =>
     this.call(`/api/items/${encodeURIComponent(itemId)}/run`, 'POST', { actor });

@@ -4,13 +4,13 @@
 import YAML from 'yaml';
 import studiesYaml from '../../../shared/studies.yaml?raw';
 import planYaml from '../../../shared/plan.yaml?raw';
-import { FAILURE_REASONS, mulberry32, seedDistribution } from '../../../shared/catalog';
-import { candidatesFor, effectiveBatchSize, resolveConfig, type ConfigDoc, type ResolvedConfig } from '../../../shared/config';
-import { computePlan, itemsToTrigger, normalizePlan, type PlanDoc, type RawPlan } from '../../../shared/plan';
+import { FAILURE_REASONS, mulberry32, renderPath, seedDistribution, type ModalityKey } from '../../../shared/catalog';
+import { candidatesFor, effectiveBatchSize, pathVars, resolveConfig, type ConfigDoc, type ResolvedConfig } from '../../../shared/config';
+import { computePlan, itemsToTrigger, normalizePlan, progressFromPipelines, type PlanDoc, type RawDeliverable, type RawPlan } from '../../../shared/plan';
 import type {
-  DeliverableState, EventKind, ItemPatch, PipelineStatus, Snapshot, Task, TrackerEvent, WorkflowRun,
+  DataLocation, DeliverableState, EventKind, ItemPatch, PipelineStatus, Snapshot, Task, TrackerEvent, WorkflowRun,
 } from '../../../shared/types';
-import { BaseSource, type TrackerSource } from './source';
+import { BaseSource, type LocationPatch, type TrackerSource } from './source';
 
 const rnd = (a: number, b: number) => Math.floor(a + Math.random() * (b - a + 1));
 const pick = <T,>(xs: readonly T[]) => xs[rnd(0, xs.length - 1)];
@@ -31,6 +31,8 @@ export class MockSource extends BaseSource implements TrackerSource {
   private nextRun = 1;
   private weighted: PipelineStatus[] = [];
   private excludeReason = new Map<string, string>();
+  private locations: DataLocation[] = [];
+  private nextLocation = 1;
 
   constructor(intervalMs = 1500) {
     super();
@@ -48,7 +50,7 @@ export class MockSource extends BaseSource implements TrackerSource {
           },
           steps: rp.steps.map((st, i) => ({
             key: st.key, name: st.name, ordinal: i + 1, mode: st.mode, role: st.role, slaDays: st.slaDays,
-            launch: st.launch, queued: d.steps[i].queued + d.steps[i].running, running: 0, failed: d.steps[i].failed,
+            launch: st.launch, output: st.output, queued: d.steps[i].queued + d.steps[i].running, running: 0, failed: d.steps[i].failed,
             activeRuns: 0,
           })),
         };
@@ -66,10 +68,18 @@ export class MockSource extends BaseSource implements TrackerSource {
         }
       }
     }
+    const at = new Date().toISOString();
+    for (const s of this.cfg.studies) {
+      for (const l of s.locations) {
+        this.locations.push({ id: this.nextLocation++, study: l.study, modality: l.modality, key: l.key, path: l.path,
+          host: l.host, description: null, updatedBy: 'studies.yaml', updatedAt: at });
+      }
+    }
     const rows = normalizePlan(YAML.parse(planYaml) as PlanDoc, {
       people: this.cfg.people.map((p) => p.name),
       pipelines: this.pipes.map((p) => p.id),
       studies: this.cfg.studies.map((s) => s.id),
+      steps: Object.fromEntries(this.pipes.map((p) => [p.id, p.steps.map((x) => x.key)])),
     });
     this.raw = { ...rows, runs: [] };
     for (const d of this.plan().deliverables) this.lastState.set(d.id, d.state);
@@ -80,12 +90,14 @@ export class MockSource extends BaseSource implements TrackerSource {
 
   // ---------- helpers ----------
 
-  private released() {
-    return Object.fromEntries(this.pipes.map((p) => [p.id, p.expected ? p.released / p.expected : 0]));
-  }
+  private render = (template: string, d: RawDeliverable) => {
+    const study = this.cfg.studies.find((x) => x.id === d.study);
+    const locs = this.locations.filter((l) => l.study === d.study) as { modality: ModalityKey | null; key: string; path: string }[];
+    return renderPath(template, pathVars(locs, { study: d.study ?? 'multi', release: d.release ?? study?.release ?? null, deliverable: d.id }));
+  };
 
   private plan() {
-    return computePlan(this.raw, this.released(), Date.now());
+    return computePlan(this.raw, progressFromPipelines(this.pipes), Date.now(), this.render);
   }
 
   private emit() {
@@ -93,7 +105,9 @@ export class MockSource extends BaseSource implements TrackerSource {
     this.set({
       snapshot: {
         generatedAt: new Date().toISOString(),
-        studies: this.cfg.studies.map((s) => ({ id: s.id, name: s.name, source: s.source, team: s.team })),
+        studies: this.cfg.studies.map((s) => ({
+          id: s.id, name: s.name, source: s.source, host: s.host, release: s.release, visits: s.visits, team: s.team,
+        })),
         people: this.cfg.people,
         pipelines: this.pipes.map((p) => ({ ...p, steps: p.steps.map((s) => ({ ...s })) })),
         tasks: [...this.tasks],
@@ -101,6 +115,7 @@ export class MockSource extends BaseSource implements TrackerSource {
         deliverables: plan.deliverables,
         workflows: plan.workflows,
         runs: this.raw.runs.slice(0, 150),
+        locations: [...this.locations],
       } satisfies Snapshot,
     });
   }
@@ -242,8 +257,10 @@ export class MockSource extends BaseSource implements TrackerSource {
     // colleagues work their deliverable items
     let plan = this.plan();
     if (Math.random() < 0.08) {
+      const external = new Set(this.raw.workflows.filter((w) => w.trigger === 'external').map((w) => w.id));
       const items = plan.deliverables.flatMap((d) => d.items).filter((i) =>
-        i.mode === 'manual' && i.assignee && i.assignee !== 'You' && (i.status === 'ready' || i.status === 'in_progress'));
+        (i.mode === 'manual' || external.has(i.workflowId ?? '')) && i.assignee && i.assignee !== 'You'
+        && (i.status === 'ready' || i.status === 'in_progress'));
       if (items.length) {
         const it = pick(items);
         this.setItemStatus(it.id, it.status === 'ready' ? 'in_progress' : 'done', it.assignee!);
@@ -280,7 +297,7 @@ export class MockSource extends BaseSource implements TrackerSource {
   private setItemStatus(itemId: string, status: NonNullable<ItemPatch['status']>, actor: string) {
     const it = this.raw.items.find((i) => i.id === itemId)!;
     it.status = status;
-    const verb = { todo: 'reopened', in_progress: 'started', done: 'completed', skipped: 'skipped' }[status];
+    const verb = { todo: 'reopened', in_progress: 'started', done: 'completed', skipped: 'skipped', failed: 'reported a failure in' }[status];
     this.log({ deliverableId: it.deliverableId, kind: 'item', actor, text: `${actor} ${verb} “${it.title}”` });
   }
 
@@ -337,14 +354,20 @@ export class MockSource extends BaseSource implements TrackerSource {
     const item = this.plan().deliverables.flatMap((d) => d.items).find((i) => i.id === itemId);
     if (!item) throw new Error(`Unknown item "${itemId}"`);
     const raw = this.raw.items.find((i) => i.id === itemId)!;
+    const wf = this.raw.workflows.find((w) => w.id === item.workflowId);
+    const reportable = item.mode === 'manual' || wf?.trigger === 'external';
     if (patch.assignee !== undefined) {
-      if (item.mode !== 'manual') throw new Error(`“${item.title}” is automated; its workflow maintainer is responsible`);
       raw.assignee = patch.assignee;
       this.log({ deliverableId: raw.deliverableId, kind: 'assign', actor,
         text: patch.assignee === actor ? `${actor} took “${item.title}”` : patch.assignee ? `“${item.title}” assigned to ${patch.assignee}` : `“${item.title}” unassigned` });
     }
+    if (patch.outputPath !== undefined) {
+      raw.outputOverride = patch.outputPath || null;
+      this.log({ deliverableId: raw.deliverableId, kind: 'item', actor,
+        text: patch.outputPath ? `Output of “${item.title}” recorded at ${patch.outputPath}` : `Output path of “${item.title}” reset to the template` });
+    }
     if (patch.status) {
-      if (item.mode !== 'manual') throw new Error(`“${item.title}” is automated; its status follows its workflow runs`);
+      if (!reportable) throw new Error(`“${item.title}” is launched by the tracker; its status follows its workflow runs`);
       if ((patch.status === 'in_progress' || patch.status === 'done') && item.status === 'blocked') {
         throw new Error(`“${item.title}” is blocked: ${item.blockedBy.join('; ')}`);
       }
@@ -353,6 +376,41 @@ export class MockSource extends BaseSource implements TrackerSource {
     this.deliverables();
     this.emit();
   };
+
+  addLocation = async (e: LocationPatch, actor: string) => {
+    if (!e.study || !e.key || !e.path) throw new Error('Choose a study, a name and a path');
+    if (this.locations.some((l) => l.study === e.study && l.key === e.key && (l.modality ?? null) === (e.modality || null))) {
+      throw new Error(`${e.study} already has "${e.key}" for ${e.modality || 'all modalities'}; edit that entry instead`);
+    }
+    const host = e.host || this.cfg.studies.find((s) => s.id === e.study)?.host || 'local';
+    this.locations.push({ id: this.nextLocation++, study: e.study, modality: (e.modality || null) as ModalityKey | null, key: e.key,
+      path: e.path, host, description: e.description ?? null, updatedBy: actor, updatedAt: new Date().toISOString() });
+    this.log({ kind: 'location', actor, text: `Added ${e.study}${e.modality ? ` ${e.modality}` : ''} ${e.key} = ${e.path}` });
+    this.emit();
+  };
+
+  updateLocation = async (id: number, p: LocationPatch, actor: string) => {
+    const l = this.locations.find((x) => x.id === id);
+    if (!l) throw new Error(`Path entry ${id} does not exist`);
+    const before = l.path;
+    Object.assign(l, {
+      path: p.path ?? l.path, host: p.host ?? l.host, description: p.description !== undefined ? p.description : l.description,
+      updatedBy: actor, updatedAt: new Date().toISOString(),
+    });
+    this.locations = [...this.locations];
+    this.log({ kind: 'location', actor, text: `Edited ${l.study}${l.modality ? ` ${l.modality}` : ''} ${l.key}${before !== l.path ? `: ${before} → ${l.path}` : ''}` });
+    this.emit();
+  };
+
+  deleteLocation = async (id: number, actor: string) => {
+    const l = this.locations.find((x) => x.id === id);
+    if (!l) throw new Error(`Path entry ${id} does not exist`);
+    this.locations = this.locations.filter((x) => x.id !== id);
+    this.log({ kind: 'location', actor, text: `Removed ${l.study}${l.modality ? ` ${l.modality}` : ''} ${l.key} (was ${l.path})` });
+    this.emit();
+  };
+
+  fetchUnits = async () => null;
 
   runItem = async (itemId: string, actor: string) => {
     const item = this.plan().deliverables.flatMap((d) => d.items).find((i) => i.id === itemId);

@@ -12,12 +12,19 @@ export interface WorkflowDef {
   command: string; description?: string;
 }
 export interface ItemDef {
-  id: string; title: string; mode: ItemMode; workflow?: string; assignee?: string;
+  id: string; title: string; mode: ItemMode; workflow?: string;
+  /** Who does it (manual) or who runs it (automated). */
+  assignee?: string;
   status?: ItemStoredStatus; due?: string; after?: string[];
+  /** Where the result goes: path template using the study's path inventory plus {release} {deliverable}. */
+  output?: string;
 }
 export interface DeliverableDef {
   id: string; title: string; study?: string | null; kind: DeliverableKind; owner: string; due?: string;
-  description?: string; depends_on?: string[]; gates?: { pipeline: string; released: number }[];
+  release?: string;
+  description?: string; depends_on?: string[];
+  /** `done` (or legacy `released`) = share of units past `step`, or complete when step is omitted. */
+  gates?: { pipeline: string; step?: string; done?: number; released?: number }[];
   raci?: Partial<Record<Raci, string[]>>; items: ItemDef[];
 }
 export interface PlanDoc { workflows: WorkflowDef[]; deliverables: DeliverableDef[] }
@@ -26,12 +33,15 @@ export interface PlanDoc { workflows: WorkflowDef[]; deliverables: DeliverableDe
 
 export interface RawDeliverable {
   id: string; title: string; study: string | null; kind: DeliverableKind; description: string | null;
-  owner: string; dueDate: string | null; dependsOn: string[];
-  gates: { pipelineId: string; threshold: number }[]; raci: { person: string; role: Raci }[]; sortOrder: number;
+  owner: string; dueDate: string | null; dependsOn: string[]; release: string | null;
+  gates: { pipelineId: string; stepKey: string | null; threshold: number }[]; raci: { person: string; role: Raci }[]; sortOrder: number;
 }
 export interface RawItem {
   id: string; deliverableId: string; ordinal: number; title: string; mode: ItemMode;
   workflowId: string | null; assignee: string | null; status: ItemStoredStatus; dueDate: string | null; after: string[];
+  outputTemplate: string | null;
+  /** Actual output path recorded by whoever ran it, when it differs from the template. */
+  outputOverride?: string | null;
 }
 export interface RawWorkflow {
   id: string; name: string; engine: string; trigger: WorkflowTrigger; maintainer: string;
@@ -78,7 +88,7 @@ export function findCycle(edges: Map<string, string[]>): string[] | null {
  * (unknown people, pipelines, workflows, dependencies, or cycles).
  */
 export function normalizePlan(
-  doc: PlanDoc, known: { people: string[]; pipelines: string[]; studies: string[] },
+  doc: PlanDoc, known: { people: string[]; pipelines: string[]; studies: string[]; steps?: Record<string, string[]> },
 ): Omit<RawPlan, 'runs'> {
   const errors: string[] = [];
   const people = new Set(known.people);
@@ -94,7 +104,7 @@ export function normalizePlan(
     const where = `workflow ${w.id ?? '(no id)'}`;
     if (!w.id || !w.name || !w.command) errors.push(`${where}: id, name and command are required`);
     if (wfIds.has(w.id)) errors.push(`${where}: duplicate id`);
-    if (w.trigger !== 'on_ready' && w.trigger !== 'manual') errors.push(`${where}: trigger must be on_ready or manual`);
+    if (!['on_ready', 'manual', 'external'].includes(w.trigger)) errors.push(`${where}: trigger must be external, on_ready or manual`);
     person(w.maintainer, where);
     wfIds.add(w.id);
     workflows.push({
@@ -122,8 +132,10 @@ export function normalizePlan(
       if (dep === d.id) errors.push(`${where}: depends on itself`);
     }
     for (const g of d.gates ?? []) {
+      const share = g.done ?? g.released;
       if (!pipelines.has(g.pipeline)) errors.push(`${where}: unknown pipeline "${g.pipeline}"`);
-      if (!(g.released > 0 && g.released <= 1)) errors.push(`${where}: gate ${g.pipeline} released must be between 0 and 1`);
+      else if (g.step && known.steps && !known.steps[g.pipeline]?.includes(g.step)) errors.push(`${where}: pipeline ${g.pipeline} has no step "${g.step}"`);
+      if (!(share !== undefined && share > 0 && share <= 1)) errors.push(`${where}: gate ${g.pipeline} needs done between 0 and 1`);
     }
     const raci: { person: string; role: Raci }[] = [{ person: d.owner, role: 'A' }];
     for (const [role, names] of Object.entries(d.raci ?? {}) as [Raci, string[]][]) {
@@ -137,7 +149,9 @@ export function normalizePlan(
     deliverables.push({
       id: d.id, title: d.title, study: d.study ?? null, kind: d.kind, description: d.description ?? null,
       owner: d.owner, dueDate: d.due ? String(d.due) : null, dependsOn: d.depends_on ?? [],
-      gates: (d.gates ?? []).map((g) => ({ pipelineId: g.pipeline, threshold: g.released })), raci, sortOrder: order,
+      release: d.release != null ? String(d.release) : null,
+      gates: (d.gates ?? []).map((g) => ({ pipelineId: g.pipeline, stepKey: g.step ?? null, threshold: (g.done ?? g.released)! })),
+      raci, sortOrder: order,
     });
 
     const local = new Set((d.items ?? []).map((i) => i.id));
@@ -149,17 +163,18 @@ export function normalizePlan(
         if (!it.workflow || !wfIds.has(it.workflow)) errors.push(`${iw}: automated items need a known workflow`);
       } else if (it.mode === 'manual') {
         if (it.workflow) errors.push(`${iw}: manual items cannot have a workflow`);
-        person(it.assignee, iw);
       } else errors.push(`${iw}: mode must be manual or automated`);
+      person(it.assignee, iw);
       if (it.status && !STORED.includes(it.status)) errors.push(`${iw}: status must be one of ${STORED.join(', ')}`);
       if (it.due && !DATE.test(String(it.due))) errors.push(`${iw}: due must be YYYY-MM-DD`);
       for (const a of it.after ?? []) if (!local.has(a)) errors.push(`${iw}: "after" refers to unknown item "${a}"`);
       items.push({
         id: `${d.id}/${it.id}`, deliverableId: d.id, ordinal: i + 1, title: it.title, mode: it.mode,
         workflowId: it.mode === 'automated' ? it.workflow ?? null : null,
-        assignee: it.mode === 'manual' ? it.assignee ?? null : null,
+        assignee: it.assignee ?? null,
         status: it.status ?? 'todo', dueDate: it.due ? String(it.due) : null,
         after: (it.after ?? []).map((a) => `${d.id}/${a}`),
+        outputTemplate: it.output ?? null,
       });
     });
   });
@@ -184,7 +199,11 @@ const DAY = 864e5;
  * which items are ready, risk against due dates, and per-workflow run history.
  * `released` maps pipeline id → released share (0-1).
  */
-export function computePlan(raw: RawPlan, released: Record<string, number>, now: number): {
+export function computePlan(
+  raw: RawPlan, progress: Record<string, number>, now: number,
+  /** Renders an item's output template for a deliverable (path inventory lookup). */
+  renderOutput: (template: string, d: RawDeliverable) => string = (t) => t,
+): {
   deliverables: Deliverable[]; workflows: Workflow[];
 } {
   const byId = new Map(raw.deliverables.map((d) => [d.id, d]));
@@ -207,12 +226,12 @@ export function computePlan(raw: RawPlan, released: Record<string, number>, now:
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((d) => {
       const gates: Gate[] = d.gates.map((g) => {
-        const current = released[g.pipelineId] ?? 0;
-        return { pipelineId: g.pipelineId, threshold: g.threshold, current, met: current >= g.threshold };
+        const current = progress[progressKey(g.pipelineId, g.stepKey)] ?? 0;
+        return { pipelineId: g.pipelineId, stepKey: g.stepKey, threshold: g.threshold, current, met: current >= g.threshold };
       });
       const blockedBy = [
         ...d.dependsOn.filter((id) => !isDone(id)).map((id) => `Waiting for “${byId.get(id)?.title ?? id}”`),
-        ...gates.filter((g) => !g.met).map((g) => `${g.pipelineId} at ${pct(g.current)} of ${pct(g.threshold)} released`),
+        ...gates.filter((g) => !g.met).map((g) => `${g.pipelineId} ${g.stepKey ? `past ${g.stepKey}` : 'complete'}: ${pct(g.current)} of ${pct(g.threshold)} needed`),
       ];
       const open = blockedBy.length === 0;
       const raws = [...(itemsOf.get(d.id) ?? [])].sort((a, b) => a.ordinal - b.ordinal);
@@ -230,6 +249,8 @@ export function computePlan(raw: RawPlan, released: Record<string, number>, now:
           id: it.id, deliverableId: it.deliverableId, ordinal: it.ordinal, title: it.title, mode: it.mode,
           workflowId: it.workflowId, assignee: it.assignee, storedStatus: it.status, status,
           dueDate: it.dueDate, after: it.after, blockedBy: reasons, lastRun: lastRun.get(it.id) ?? null,
+          outputTemplate: it.outputTemplate,
+          outputPath: it.outputOverride ?? (it.outputTemplate ? renderOutput(it.outputTemplate, d) : null),
         };
       });
       const done = items.filter((i) => i.status === 'done' || i.status === 'skipped').length;
@@ -247,7 +268,7 @@ export function computePlan(raw: RawPlan, released: Record<string, number>, now:
       }
       return {
         id: d.id, title: d.title, study: d.study, kind: d.kind, description: d.description, owner: d.owner,
-        dueDate: d.dueDate, raci: d.raci, dependsOn: d.dependsOn,
+        dueDate: d.dueDate, release: d.release, raci: d.raci, dependsOn: d.dependsOn,
         neededBy: raw.deliverables.filter((x) => x.dependsOn.includes(d.id)).map((x) => x.id),
         gates, state, risk, blockedBy, done, total, items,
       };
@@ -267,6 +288,33 @@ export function computePlan(raw: RawPlan, released: Record<string, number>, now:
 
   return { deliverables, workflows };
 }
+
+/** Minimal pipeline shape for progress shares (a PipelineStatus fits). */
+export interface ProgressPipeline {
+  id: string; expected: number; released: number;
+  steps: { key: string; queued: number; running: number; failed: number }[];
+}
+
+/**
+ * Progress shares: `pipeline` = share complete; `pipeline#step` = share of units past that step
+ * (at a later step or complete). Excluded units are not counted.
+ */
+export function progressFromPipelines(pipelines: ProgressPipeline[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const p of pipelines) {
+    const n = p.expected || 1;
+    out[p.id] = p.released / n;
+    let later = p.released;
+    for (let i = p.steps.length - 1; i >= 0; i--) {
+      out[`${p.id}#${p.steps[i].key}`] = later / n;
+      later += p.steps[i].queued + p.steps[i].running + p.steps[i].failed;
+    }
+  }
+  return out;
+}
+
+/** Key into the progress map: share of a pipeline's units past a step, or complete when step is null. */
+export const progressKey = (pipelineId: string, stepKey: string | null) => (stepKey ? `${pipelineId}#${stepKey}` : pipelineId);
 
 /** Automated items the scheduler should start now: ready, workflow triggers on_ready, nothing in flight. */
 export function itemsToTrigger(deliverables: Deliverable[], workflows: Workflow[]): WorkItem[] {

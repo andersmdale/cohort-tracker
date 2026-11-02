@@ -10,6 +10,28 @@ export function readConfig(path: URL | string = CONFIG_PATH): ResolvedConfig {
   return resolveConfig(YAML.parse(readFileSync(path, 'utf8')) as ConfigDoc);
 }
 
+/**
+ * Seed the path inventory. Existing entries are kept (the dashboard is where they're edited)
+ * unless `overwrite` is set; entries missing from the database are always added.
+ */
+async function seedLocations(db: pg.PoolClient, cfg: ResolvedConfig, overwrite: boolean) {
+  let added = 0;
+  for (const s of cfg.studies) {
+    for (const l of s.locations) {
+      const r = await db.query(
+        `INSERT INTO data_location (study_id, modality, key, path, host, updated_by)
+         VALUES ($1,$2,$3,$4,$5,'studies.yaml')
+         ON CONFLICT (study_id, COALESCE(modality, ''), key) DO ${overwrite
+           ? `UPDATE SET path = EXCLUDED.path, host = EXCLUDED.host, updated_by = 'studies.yaml', updated_at = now()`
+           : 'NOTHING'}`,
+        [l.study, l.modality, l.key, l.path, l.host],
+      );
+      added += r.rowCount ?? 0;
+    }
+  }
+  return added;
+}
+
 async function upsertPeopleAndStudies(db: pg.PoolClient, cfg: ResolvedConfig) {
   for (const p of cfg.people) {
     await db.query(
@@ -19,9 +41,9 @@ async function upsertPeopleAndStudies(db: pg.PoolClient, cfg: ResolvedConfig) {
   }
   for (const s of cfg.studies) {
     await db.query(
-      `INSERT INTO study (study_id, name, source, sort_order) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (study_id) DO UPDATE SET name = $2, source = $3, sort_order = $4`,
-      [s.id, s.name, s.source, s.sortOrder],
+      `INSERT INTO study (study_id, name, source, sort_order, host, release, visits) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (study_id) DO UPDATE SET name = $2, source = $3, sort_order = $4, host = $5, release = $6, visits = $7`,
+      [s.id, s.name, s.source, s.sortOrder, s.host, s.release, s.visits],
     );
     await db.query('DELETE FROM study_team WHERE study_id = $1', [s.id]);
     for (const t of s.team) {
@@ -36,14 +58,14 @@ function settings(p: ResolvedPipeline, units: number) {
 
 async function writeSteps(db: pg.PoolClient, p: ResolvedPipeline, insert: boolean) {
   for (const [i, st] of p.steps.entries()) {
-    const args = [p.id, st.key, i + 1, st.name, st.mode, st.role, st.slaDays, st.taskLabel, st.excludeReason, st.command, st.launch];
+    const args = [p.id, st.key, i + 1, st.name, st.mode, st.role, st.slaDays, st.taskLabel, st.excludeReason, st.command, st.launch, st.output];
     if (insert) {
       await db.query(
-        `INSERT INTO step (pipeline_id, step_key, ordinal, name, mode, role, sla_days, task_label, exclude_reason, command, launch)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, args);
+        `INSERT INTO step (pipeline_id, step_key, ordinal, name, mode, role, sla_days, task_label, exclude_reason, command, launch, output)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, args);
     } else {
       await db.query(
-        `UPDATE step SET name = $4, role = $6, sla_days = $7, task_label = $8, exclude_reason = $9, command = $10, launch = $11
+        `UPDATE step SET name = $4, role = $6, sla_days = $7, task_label = $8, exclude_reason = $9, command = $10, launch = $11, output = $12
           WHERE pipeline_id = $1 AND step_key = $2 AND ordinal = $3 AND mode = $5`, args);
     }
   }
@@ -52,6 +74,7 @@ async function writeSteps(db: pg.PoolClient, p: ResolvedPipeline, insert: boolea
 /** Seed path: create people, studies, teams, pipelines and steps. `units` gives the scaled unit count per pipeline. */
 export async function createFromConfig(db: pg.PoolClient, cfg: ResolvedConfig, units: (p: ResolvedPipeline) => number) {
   await upsertPeopleAndStudies(db, cfg);
+  await seedLocations(db, cfg, true);
   for (const s of cfg.studies) {
     for (const p of s.pipelines) {
       await db.query(
@@ -69,7 +92,7 @@ export async function createFromConfig(db: pg.PoolClient, cfg: ResolvedConfig, u
  * config:load path: update settings on a live database. Refuses structural changes
  * (new studies or modalities, added, removed or reordered steps), which need a reseed.
  */
-export async function updateFromConfig(db: pg.PoolClient, cfg: ResolvedConfig) {
+export async function updateFromConfig(db: pg.PoolClient, cfg: ResolvedConfig, opts: { overwritePaths?: boolean } = {}) {
   const problems: string[] = [];
   const existing = await db.query<{ pipeline_id: string; n: number }>(
     'SELECT p.pipeline_id, count(w.unit_id)::int AS n FROM pipeline p LEFT JOIN work_unit w USING (pipeline_id) GROUP BY 1');
@@ -93,6 +116,7 @@ export async function updateFromConfig(db: pg.PoolClient, cfg: ResolvedConfig) {
     throw new Error(`These changes need a reseed (npm run db:reset):\n  - ${problems.join('\n  - ')}`);
   }
   await upsertPeopleAndStudies(db, cfg);
+  const added = await seedLocations(db, cfg, opts.overwritePaths ?? false);
   let n = 0;
   for (const s of cfg.studies) {
     for (const p of s.pipelines) {
@@ -105,5 +129,5 @@ export async function updateFromConfig(db: pg.PoolClient, cfg: ResolvedConfig) {
       n++;
     }
   }
-  return n;
+  return { pipelines: n, locations: added };
 }

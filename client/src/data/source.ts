@@ -1,4 +1,6 @@
-import type { ItemPatch, Snapshot } from '../../../shared/types';
+import type { ItemPatch, Snapshot, UnitRow } from '../../../shared/types';
+
+export interface LocationPatch { study?: string; modality?: string | null; key?: string; path?: string; host?: string; description?: string | null }
 
 export type ConnectionStatus = 'connecting' | 'live' | 'error';
 
@@ -20,6 +22,11 @@ export interface TrackerSource {
   completeTask(taskId: number, actor: string): Promise<void>;
   updateItem(itemId: string, patch: ItemPatch, actor: string): Promise<void>;
   runItem(itemId: string, actor: string): Promise<void>;
+  addLocation(entry: LocationPatch, actor: string): Promise<void>;
+  updateLocation(id: number, patch: LocationPatch, actor: string): Promise<void>;
+  deleteLocation(id: number, actor: string): Promise<void>;
+  /** Subject browser; null when the source can't list subjects (mock mode). */
+  fetchUnits(q: { study?: string; modality?: string; subject?: string }): Promise<UnitRow[] | null>;
 }
 
 export abstract class BaseSource {
