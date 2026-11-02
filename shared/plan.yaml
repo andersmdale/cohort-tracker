@@ -1,0 +1,231 @@
+# Deliverables, their dependencies and owners, the work items that produce them,
+# and the automatable workflows those items run.
+#
+# Load or reload into the database with:   cd server && npm run plan:load
+# Reloading updates definitions (titles, dependencies, owners, workflows) but keeps the
+# live status and assignee of items that already exist. Add --prune to delete
+# deliverables, items and workflows that are no longer in this file.
+#
+# Dependencies
+#   depends_on:  other deliverables that must be done first
+#   gates:       pipelines that must reach a released share first (0-1)
+#   after:       items in the same deliverable that must be done first
+# Workflows
+#   trigger: on_ready  starts automatically once its item is unblocked
+#   trigger: manual    waits for someone to press Run (for steps that need a go/no-go)
+#   command placeholders: {study} {deliverable} {item} {run_id}
+
+workflows:
+  - { id: qc-report, name: Imaging QC summary report, engine: python, trigger: on_ready, maintainer: Priya N.,
+      command: "python qc_report.py --study {study} --out reports/{deliverable}" }
+  - { id: roi-extract, name: FreeSurfer ROI extraction, engine: nextflow, trigger: on_ready, maintainer: Tomas H.,
+      command: "nextflow run roi-extract.nf --study {study} -name {deliverable}-{run_id}" }
+  - { id: dti-tractstats, name: DTI tract statistics, engine: nextflow, trigger: on_ready, maintainer: Tomas H.,
+      command: "nextflow run tractstats.nf --study {study} -name {deliverable}-{run_id}" }
+  - { id: combat-harmonize, name: ComBat scanner harmonization, engine: python, trigger: on_ready, maintainer: Tomas H.,
+      command: "python combat_harmonize.py --deliverable {deliverable}" }
+  - { id: topmed-impute, name: TOPMed imputation, engine: slurm, trigger: on_ready, maintainer: Marcus O.,
+      command: "sbatch --wait impute_topmed.sh {study}" }
+  - { id: ancestry-pcs, name: Ancestry principal components, engine: slurm, trigger: on_ready, maintainer: Marcus O.,
+      command: "sbatch --wait ancestry_pcs.sh {study}" }
+  - { id: package-release, name: Package data release, engine: script, trigger: on_ready, maintainer: Ingrid L.,
+      command: "./package_release.sh {study} {deliverable}" }
+  - { id: deap-upload, name: Upload release to DEAP, engine: script, trigger: manual, maintainer: Ingrid L.,
+      command: "./deap_upload.sh {deliverable}",
+      description: "Manual trigger: publishing needs a go decision." }
+  - { id: deap-smoke-test, name: DEAP smoke test, engine: script, trigger: on_ready, maintainer: Ingrid L.,
+      command: "./deap_smoke_test.sh {deliverable}" }
+  - { id: dictionary-publish, name: Publish data dictionary, engine: script, trigger: on_ready, maintainer: Sara K.,
+      command: "./publish_dictionary.sh {study}" }
+  - { id: fema-write-jobs, name: FEMA write jobs, engine: python, trigger: on_ready, maintainer: You,
+      command: "python FEMA_write_job.py --release {deliverable}" }
+  - { id: fema-fit, name: FEMA_fit vertexwise/voxelwise, engine: slurm, trigger: on_ready, maintainer: You,
+      command: "sbatch --wait --array=1-200 fema_fit.sh {deliverable}" }
+  - { id: infant-seg, name: Infant segmentation, engine: nextflow, trigger: on_ready, maintainer: Tomas H.,
+      command: "nextflow run infant-seg.nf --study {study}" }
+  - { id: eeg-features, name: EEG feature extraction, engine: python, trigger: on_ready, maintainer: Priya N.,
+      command: "python eeg_features.py --study {study}" }
+  - { id: pheno-extract, name: Imaging phenotype extraction, engine: python, trigger: on_ready, maintainer: Marcus O.,
+      command: "python extract_idps.py --study {study} --modality dmri" }
+  - { id: regenie-gwas, name: REGENIE GWAS, engine: slurm, trigger: on_ready, maintainer: Marcus O.,
+      command: "sbatch --wait regenie_gwas.sh {deliverable}" }
+  - { id: centiloid, name: Centiloid calculation, engine: python, trigger: on_ready, maintainer: Tomas H.,
+      command: "python centiloid.py --study {study}" }
+  - { id: tracer-harmonize, name: Cross-tracer harmonization, engine: python, trigger: on_ready, maintainer: Tomas H.,
+      command: "python tracer_harmonize.py --study {study}" }
+  - { id: normative-fit, name: Normative model fit, engine: slurm, trigger: on_ready, maintainer: You,
+      command: "sbatch --wait normative_fit.sh {deliverable}" }
+  - { id: normative-validate, name: Normative model validation, engine: python, trigger: on_ready, maintainer: You,
+      command: "python normative_validate.py --deliverable {deliverable}" }
+  - { id: deviation-scores, name: Deviation scores, engine: python, trigger: on_ready, maintainer: Tomas H.,
+      command: "python deviation_scores.py --study {study}" }
+  - { id: case-control-stats, name: Case-control statistics, engine: python, trigger: on_ready, maintainer: Tomas H.,
+      command: "python case_control.py --study {study}" }
+
+deliverables:
+  - id: abcd-imaging-qc
+    title: ABCD imaging QC complete (Year 6)
+    study: ABCD
+    kind: derivative
+    owner: Priya N.
+    due: "2026-12-15"
+    gates:
+      - { pipeline: abcd-smri, released: 0.75 }
+      - { pipeline: abcd-dmri, released: 0.72 }
+      - { pipeline: abcd-fmri, released: 0.78 }
+    raci: { R: [Priya N., Tomas H.], C: [You], I: [Ingrid L.] }
+    items:
+      - { id: qc-report, title: Generate QC summary report, mode: automated, workflow: qc-report }
+      - { id: exclusions, title: Review and sign exclusion list, mode: manual, assignee: Priya N., after: [qc-report] }
+
+  - id: abcd-roi-tables
+    title: ABCD tabulated imaging derivatives
+    study: ABCD
+    kind: derivative
+    owner: Tomas H.
+    due: "2027-01-20"
+    depends_on: [abcd-imaging-qc]
+    raci: { R: [Tomas H.], C: [Priya N., You], I: [Ingrid L.] }
+    items:
+      - { id: roi, title: Extract ROI measures, mode: automated, workflow: roi-extract }
+      - { id: tracts, title: Compute DTI tract statistics, mode: automated, workflow: dti-tractstats }
+      - { id: combat, title: Harmonize across scanners, mode: automated, workflow: combat-harmonize, after: [roi, tracts] }
+      - { id: review, title: Review derivative distributions, mode: manual, assignee: Tomas H., after: [combat] }
+
+  - id: abcd-genomics-imputation
+    title: ABCD genotype imputation (TOPMed)
+    study: ABCD
+    kind: derivative
+    owner: Marcus O.
+    due: "2026-11-30"
+    gates:
+      - { pipeline: abcd-genomics, released: 0.75 }
+    raci: { R: [Marcus O.], C: [You] }
+    items:
+      - { id: impute, title: Impute to TOPMed reference, mode: automated, workflow: topmed-impute, status: done }
+      - { id: pcs, title: Compute ancestry PCs, mode: automated, workflow: ancestry-pcs, status: done, after: [impute] }
+      - { id: review, title: Review imputation QC metrics, mode: manual, assignee: Marcus O., status: in_progress, after: [pcs] }
+
+  - id: abcd-data-dictionary
+    title: ABCD harmonized data dictionary update
+    study: ABCD
+    kind: report
+    owner: Sara K.
+    due: "2026-12-20"
+    raci: { R: [Sara K.], A: [Sara K.], C: [Ingrid L.], I: [You] }
+    items:
+      - { id: draft, title: Draft dictionary changes, mode: manual, assignee: Sara K., status: in_progress }
+      - { id: review, title: Review dictionary changes, mode: manual, assignee: Ingrid L., after: [draft] }
+      - { id: publish, title: Publish dictionary, mode: automated, workflow: dictionary-publish, after: [review] }
+
+  - id: abcd-release-6
+    title: ABCD 6.0 data release
+    study: ABCD
+    kind: data_release
+    owner: You
+    due: "2027-02-28"
+    depends_on: [abcd-roi-tables, abcd-genomics-imputation, abcd-data-dictionary]
+    gates:
+      - { pipeline: abcd-assessment, released: 0.80 }
+    raci: { R: [Ingrid L., Sara K.], C: [Tomas H., Marcus O.], I: [Priya N.] }
+    items:
+      - { id: package, title: Package release files, mode: automated, workflow: package-release }
+      - { id: notes, title: Write release notes, mode: manual, assignee: Ingrid L. }
+      - { id: upload, title: Upload to DEAP, mode: automated, workflow: deap-upload, after: [package] }
+      - { id: smoke, title: Run DEAP smoke test, mode: automated, workflow: deap-smoke-test, after: [upload] }
+      - { id: approve, title: Approve public release, mode: manual, assignee: You, after: [smoke, notes] }
+
+  - id: abcd-fema-maps
+    title: FEMA vertexwise and voxelwise maps for DEAP
+    study: ABCD
+    kind: analysis
+    owner: You
+    due: "2027-03-31"
+    depends_on: [abcd-release-6]
+    raci: { R: [You], C: [Tomas H.], I: [Ingrid L.] }
+    items:
+      - { id: jobs, title: Write FEMA jobs, mode: automated, workflow: fema-write-jobs }
+      - { id: fit, title: Run FEMA_fit, mode: automated, workflow: fema-fit, after: [jobs] }
+      - { id: review, title: Review effect-size maps, mode: manual, assignee: Tomas H., after: [fit] }
+
+  - id: hbcd-release-2
+    title: HBCD Release 2.0 imaging and EEG
+    study: HBCD
+    kind: data_release
+    owner: Ingrid L.
+    due: "2027-01-31"
+    gates:
+      - { pipeline: hbcd-smri, released: 0.32 }
+      - { pipeline: hbcd-dmri, released: 0.32 }
+      - { pipeline: hbcd-eeg, released: 0.31 }
+      - { pipeline: hbcd-assessment, released: 0.30 }
+    raci: { R: [Ingrid L., Tomas H.], C: [Priya N.], I: [You] }
+    items:
+      - { id: seg, title: Run infant segmentation, mode: automated, workflow: infant-seg }
+      - { id: eeg, title: Extract EEG features, mode: automated, workflow: eeg-features }
+      - { id: qc, title: Sign off segmentation QC, mode: manual, assignee: Priya N., after: [seg] }
+      - { id: package, title: Package release files, mode: automated, workflow: package-release, after: [qc, eeg] }
+      - { id: notes, title: Write release notes, mode: manual, assignee: Sara K. }
+
+  - id: ukb-dmri-gwas
+    title: UKB dMRI imaging-genetics GWAS
+    study: UKB
+    kind: analysis
+    owner: Marcus O.
+    due: "2027-01-15"
+    gates:
+      - { pipeline: ukb-dmri, released: 0.72 }
+      - { pipeline: ukb-genomics, released: 0.68 }
+    raci: { R: [Marcus O.], C: [You] }
+    items:
+      - { id: pheno, title: Extract dMRI phenotypes, mode: automated, workflow: pheno-extract }
+      - { id: gwas, title: Run GWAS, mode: automated, workflow: regenie-gwas, after: [pheno] }
+      - { id: review, title: Review GWAS results, mode: manual, assignee: Marcus O., after: [gwas] }
+
+  - id: adni-centiloid
+    title: ADNI amyloid PET centiloid harmonization
+    study: ADNI
+    kind: derivative
+    owner: Tomas H.
+    due: "2026-12-10"
+    gates:
+      - { pipeline: adni-pet, released: 0.80 }
+    raci: { R: [Tomas H.], C: [Wei C.], I: [You] }
+    items:
+      - { id: centiloid, title: Compute centiloids, mode: automated, workflow: centiloid, status: done }
+      - { id: harmonize, title: Harmonize across tracers, mode: automated, workflow: tracer-harmonize, after: [centiloid] }
+      - { id: review, title: Review harmonized values, mode: manual, assignee: Tomas H., after: [harmonize] }
+
+  - id: lifespan-charts-v2
+    title: Lifespan normative brain charts v2
+    kind: analysis
+    owner: You
+    due: "2027-04-30"
+    description: Pools ABCD, PING, VETSA, UKB and HUNT.
+    depends_on: [abcd-roi-tables]
+    gates:
+      - { pipeline: ping-smri, released: 0.98 }
+      - { pipeline: vetsa-smri, released: 0.95 }
+      - { pipeline: ukb-smri, released: 0.75 }
+      - { pipeline: hunt-smri, released: 0.60 }
+    raci: { R: [You, Tomas H.], C: [Marcus O.], I: [Ingrid L.] }
+    items:
+      - { id: harmonize, title: Harmonize across studies, mode: automated, workflow: combat-harmonize }
+      - { id: fit, title: Fit normative models, mode: automated, workflow: normative-fit, after: [harmonize] }
+      - { id: validate, title: Validate on held-out sites, mode: automated, workflow: normative-validate, after: [fit] }
+      - { id: figures, title: Prepare charts and figures, mode: manual, assignee: You, after: [validate] }
+
+  - id: top-deviation-analysis
+    title: TOP psychosis deviation analysis
+    study: TOP
+    kind: analysis
+    owner: Tomas H.
+    due: "2027-06-30"
+    depends_on: [lifespan-charts-v2]
+    gates:
+      - { pipeline: top-smri, released: 0.78 }
+    raci: { R: [Tomas H.], C: [You] }
+    items:
+      - { id: deviations, title: Compute deviation scores, mode: automated, workflow: deviation-scores }
+      - { id: stats, title: Run case-control statistics, mode: automated, workflow: case-control-stats, after: [deviations] }
+      - { id: writeup, title: Write up results, mode: manual, assignee: You, after: [stats] }

@@ -1,0 +1,234 @@
+# Study configuration: people, default pipelines per data type, and per-study customizations.
+#
+# Settings resolve in this order (later wins):
+#   defaults  →  study  →  study.modalities.<modality>
+#
+# Apply changes to a running system:   cd server && npm run config:load
+#   Updates names, commands, engines, SLAs, launch modes, scheduler settings and teams.
+#   Changing which steps a pipeline has (add_steps / skip) needs a reseed: npm run db:reset
+#
+# Step overrides (under `steps:` at study or modality level), keyed by step key:
+#   name, command, role, sla_days, task_label, exclude_reason
+#   launch: scheduler | external   who starts processing at an automated step
+#           scheduler: the tracker queues batch runs for workers
+#           external:  the study's own engine runs it and reports through POST /api/events
+#   skip: true                     drop the step for this study/modality
+# add_steps: insert extra steps, each with `after: <step key>`
+#
+# Scheduler settings (under `scheduler:`):
+#   batch_size                 units per processing run ("auto" = expected units / 200, min 5)
+#   max_active_runs_per_step   concurrent processing runs per step
+#   auto_retry                 times a failed unit is requeued automatically before a person must act
+#   qc_batch_size              units per manual review batch (auto-assigned to the least-loaded team member)
+#
+# Unit counts are order-of-magnitude placeholders, not official numbers.
+
+people:
+  - { name: You, role: study_lead }
+  - { name: Priya N., role: qc_reviewer }
+  - { name: Tomas H., role: qc_reviewer }
+  - { name: Ingrid L., role: data_manager }
+  - { name: Marcus O., role: genomics_analyst }
+  - { name: Wei C., role: lab_liaison }
+  - { name: Sara K., role: data_manager }
+
+defaults:
+  scheduler: { batch_size: auto, max_active_runs_per_step: 2, auto_retry: 1, qc_batch_size: 50 }
+  pipelines:
+    mri:
+      engine: nextflow:mri-preproc
+      version: 3.2.0
+      steps:
+        - { key: validate, name: Validate DICOM, mode: auto, command: "dicom_validate --pipeline {pipeline}" }
+        - { key: deidentify, name: De-identify, mode: auto, command: "deid --profile strict" }
+        - { key: bids, name: BIDS convert, mode: auto, command: "dcm2bids" }
+        - { key: auto_qc, name: Auto QC, mode: auto, command: "mriqc --participant" }
+        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
+        - { key: preprocess, name: Preprocess, mode: auto, command: "preprocess --pipeline {pipeline}" }
+        - { key: release, name: Release, mode: auto, command: "package_units --pipeline {pipeline}" }
+    pet:
+      engine: pet-suvr
+      version: 1.4.0
+      steps:
+        - { key: validate, name: Validate, mode: auto }
+        - { key: deidentify, name: De-identify, mode: auto }
+        - { key: coregister, name: Coregister to MRI, mode: auto }
+        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
+        - { key: suvr, name: SUVR / centiloid, mode: auto }
+        - { key: release, name: Release, mode: auto }
+    eeg:
+      engine: eeg-prep
+      version: 2.0.1
+      steps:
+        - { key: validate, name: Validate, mode: auto }
+        - { key: bids, name: BIDS convert, mode: auto }
+        - { key: auto_qc, name: Auto QC, mode: auto }
+        - { key: visual_qc, name: Visual QC, mode: manual, role: qc_reviewer, sla_days: 7, task_label: Visual QC, exclude_reason: QC_VISUAL_FAIL }
+        - { key: preprocess, name: Preprocess, mode: auto }
+        - { key: release, name: Release, mode: auto }
+    genomics:
+      engine: gen-qc
+      version: 5.1.0
+      steps:
+        - { key: validate, name: Validate manifest, mode: auto }
+        - { key: sample_qc, name: Sample QC, mode: auto }
+        - { key: variant_qc, name: Variant QC review, mode: manual, role: genomics_analyst, sla_days: 5, task_label: Variant QC review, exclude_reason: GENO_CALLRATE }
+        - { key: impute, name: Impute, mode: auto }
+        - { key: ancestry, name: Ancestry PCs, mode: auto }
+        - { key: release, name: Release, mode: auto }
+    biospecimen:
+      engine: lims-sync
+      version: 1.0.0
+      steps:
+        - { key: accession, name: Accession, mode: auto }
+        - { key: assay, name: Assay, mode: auto }
+        - { key: batch_qc, name: Batch QC review, mode: manual, role: lab_liaison, sla_days: 5, task_label: Assay batch review, exclude_reason: ASSAY_BATCH_FAIL }
+        - { key: release, name: Release, mode: auto }
+    assessment:
+      engine: redcap-sync
+      version: 2.3.0
+      steps:
+        - { key: validate, name: Validate, mode: auto }
+        - { key: site_queries, name: Site queries, mode: manual, role: data_manager, sla_days: 10, task_label: Resolve site queries, exclude_reason: DATA_UNRESOLVABLE }
+        - { key: harmonize, name: Harmonize, mode: auto }
+        - { key: release, name: Release, mode: auto }
+
+studies:
+  - id: ABCD
+    name: Adolescent Brain Cognitive Dev.
+    source: NDA fast-track
+    team: { qc_reviewer: [Priya N., Tomas H.], data_manager: [Ingrid L., Sara K.], genomics_analyst: [Marcus O.] }
+    scheduler: { max_active_runs_per_step: 3 }
+    modalities:
+      smri: { units: 40100 }
+      dmri:
+        units: 38200
+        engine: nextflow:abcd-dmri
+        version: 3.3.0
+        steps:
+          auto_qc: { command: "dmri_autoqc --max-motion 2.0 --min-volumes 96" }
+          preprocess: { name: Preprocess (qsiprep), command: "qsiprep --output-resolution 1.7" }
+      fmri:
+        units: 37600
+        add_steps:
+          - { key: recon, name: Offline multiband recon, mode: auto, after: validate, launch: external }
+        steps:
+          visual_qc: { sla_days: 10 }
+      genomics: { units: 11800 }
+      assessment: { units: 47300 }
+    sim: { activity: 5, released: 0.76, not_received: 0.55 }
+
+  - id: HBCD
+    name: HEALthy Brain & Child Dev.
+    source: HBCD DCC
+    team: { qc_reviewer: [Priya N.], data_manager: [Sara K.], lab_liaison: [Wei C.] }
+    scheduler: { qc_batch_size: 30 }
+    steps:
+      visual_qc: { sla_days: 5 }
+    modalities:
+      smri:
+        units: 9100
+        engine: nextflow:infant-mri
+        version: 1.2.0
+        add_steps:
+          - { key: infant_seg, name: Infant segmentation, mode: auto, after: auto_qc }
+      dmri: { units: 8600, engine: nextflow:infant-mri, version: 1.2.0 }
+      fmri: { units: 8000, engine: nextflow:infant-mri, version: 1.2.0 }
+      eeg:
+        units: 9500
+        steps:
+          auto_qc: { name: Auto QC (HAPPE), command: "happe --infant" }
+      biospecimen: { units: 12200 }
+      assessment: { units: 15400 }
+    sim: { activity: 6, released: 0.31, not_received: 0.72 }
+
+  - id: UKB
+    name: UK Biobank
+    source: UKB showcase
+    team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
+    scheduler: { batch_size: 400, max_active_runs_per_step: 4, qc_batch_size: 200 }
+    modalities:
+      smri: { units: 100000 }
+      dmri: { units: 95200 }
+      fmri: { units: 94800 }
+      genomics:
+        units: 500000
+        steps:
+          impute: { skip: true }    # UKB distributes imputed genotypes
+      assessment: { units: 502000 }
+    sim: { activity: 4, released: 0.71, not_received: 0.6 }
+
+  - id: ADNI
+    name: Alzheimer's Disease NI
+    source: LONI IDA
+    team: { qc_reviewer: [Tomas H.], data_manager: [Sara K.], genomics_analyst: [Marcus O.], lab_liaison: [Wei C.] }
+    modalities:
+      smri: { units: 12400 }
+      pet:
+        units: 8100
+        steps:
+          visual_qc: { sla_days: 10 }
+          suvr: { name: Centiloid, command: "centiloid --tracers PIB,FBP,FBB" }
+      genomics: { units: 2500 }
+      biospecimen: { units: 6200 }
+      assessment: { units: 15800 }
+    sim: { activity: 3, released: 0.86, not_received: 0.5 }
+
+  - id: PING
+    name: Pediatric Imaging, Neurocog. & Genetics
+    source: PING archive
+    team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
+    scheduler: { max_active_runs_per_step: 1, auto_retry: 0 }
+    modalities:
+      smri: { units: 1490 }
+      dmri: { units: 1420 }
+      genomics: { units: 1490 }
+      assessment: { units: 1490 }
+    sim: { activity: 1, released: 0.985, not_received: 0.1 }
+
+  - id: VETSA
+    name: Vietnam Era Twin Study of Aging
+    source: VETSA archive
+    team: { qc_reviewer: [Tomas H.], data_manager: [Ingrid L.], genomics_analyst: [Marcus O.] }
+    scheduler: { max_active_runs_per_step: 1, auto_retry: 0 }
+    modalities:
+      smri: { units: 1310 }
+      dmri: { units: 1240 }
+      genomics: { units: 1400 }
+      assessment: { units: 4100 }
+    sim: { activity: 1, released: 0.93, not_received: 0.3 }
+
+  - id: TOP
+    name: Thematically Organized Psychosis
+    source: TSD export
+    team: { qc_reviewer: [Priya N.], data_manager: [Sara K.], genomics_analyst: [Marcus O.] }
+    # MRI is processed inside TSD by the site's own engine, which reports progress to the tracker
+    modalities:
+      smri:
+        units: 3500
+        engine: tsd:mri-pipeline
+        version: 2.1.0
+        steps: &tsd_external
+          validate: { launch: external }
+          deidentify: { launch: external }
+          bids: { launch: external }
+          auto_qc: { launch: external }
+          preprocess: { launch: external }
+      dmri: { units: 2800, engine: tsd:mri-pipeline, version: 2.1.0, steps: *tsd_external }
+      fmri: { units: 2500, engine: tsd:mri-pipeline, version: 2.1.0, steps: *tsd_external }
+      genomics: { units: 3500 }
+      assessment: { units: 4000 }
+    sim: { activity: 3, released: 0.79, not_received: 0.45 }
+
+  - id: HUNT
+    name: Trøndelag Health Study
+    source: HUNT Cloud
+    team: { qc_reviewer: [Priya N.], data_manager: [Ingrid L., Sara K.], genomics_analyst: [Marcus O.] }
+    scheduler: { batch_size: 250 }
+    steps:
+      site_queries: { sla_days: 14 }
+    modalities:
+      smri: { units: 1010, scheduler: { batch_size: 10 } }
+      genomics: { units: 88000 }
+      assessment: { units: 229000 }
+    sim: { activity: 3, released: 0.62, not_received: 0.5 }

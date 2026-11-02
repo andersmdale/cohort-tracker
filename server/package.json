@@ -1,0 +1,28 @@
+{
+  "name": "cohort-tracker-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "db:reset": "tsx src/seed.ts --reset",
+    "seed": "tsx src/seed.ts",
+    "config:load": "tsx src/load.ts config",
+    "plan:load": "tsx src/load.ts plan",
+    "simulate": "tsx src/simulate.ts",
+    "worker": "tsx src/worker.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "pg": "8.13.1",
+    "tsx": "4.19.2",
+    "yaml": "2.6.1"
+  },
+  "devDependencies": {
+    "@types/express": "4.17.21",
+    "@types/node": "22.10.2",
+    "@types/pg": "8.11.10",
+    "typescript": "5.6.3"
+  }
+}
